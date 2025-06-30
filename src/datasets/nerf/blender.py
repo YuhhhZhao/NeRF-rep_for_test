@@ -52,7 +52,7 @@ class Dataset(data.Dataset):
             img_path = os.path.join(self.scene_path, frame['file_path'] + '.png')
             if os.path.exists(img_path):
                 img = imageio.imread(img_path)
-                
+                import ipdb; ipdb.set_trace()  # 调试用
                 # 转换为torch tensor
                 img = torch.from_numpy(img).float()
                 
