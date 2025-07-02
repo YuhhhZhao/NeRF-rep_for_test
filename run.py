@@ -64,6 +64,7 @@ def run_evaluate():
     renderer = make_renderer(cfg, network)
     net_time = []
     for batch in tqdm.tqdm(data_loader):
+        import ipdb; ipdb.set_trace()
         for k in batch:
             if k != "meta":
                 batch[k] = batch[k].cuda()
@@ -86,3 +87,4 @@ def run_evaluate():
 
 if __name__ == "__main__":
     globals()["run_" + args.type]()
+    

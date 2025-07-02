@@ -42,7 +42,6 @@ class Dataset(data.Dataset):
             self.focal = 0.5 * self.W / np.tan(0.5 * self.meta['camera_angle_x'])
         else:
             self.focal = 800  
-        
         # 加载所有图像和相机位姿
         self.images = []
         self.poses = []
@@ -52,16 +51,9 @@ class Dataset(data.Dataset):
             img_path = os.path.join(self.scene_path, frame['file_path'] + '.png')
             if os.path.exists(img_path):
                 img = imageio.imread(img_path)
-                import ipdb; ipdb.set_trace()  # 调试用
+                #import ipdb; ipdb.set_trace()  # 调试用
                 # 转换为torch tensor
                 img = torch.from_numpy(img).float()
-                
-                # 处理 RGBA -> RGB
-                if img.shape[-1] == 4:
-                    # 使用 alpha 混合
-                    alpha = img[..., 3:4] / 255.0
-                    img = img[..., :3] * alpha + (1 - alpha) * 255
-                
                 img = img / 255.0
                 if img.shape[:2] != (self.H, self.W):
                     # 需要调整维度顺序: [H, W, C] -> [C, H, W] -> [1, C, H, W]
