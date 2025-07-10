@@ -110,9 +110,6 @@ class Dataset(data.Dataset):
             "intrinsics": intrinsics, # 相机内参 [3, 3]
             "H": self.H,
             "W": self.W,
-            "focal": self.focal,
-            "scene": self.scene,
-            "split": self.split,
         }
         return ret
 

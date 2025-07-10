@@ -1,5 +1,5 @@
 task: "nerf_replication"
-gpus: [1] # set gpu device number
+gpus: [0] # set gpu device number
 exp_name: "nerf"
 scene: "lego"
 
