@@ -72,38 +72,64 @@ class Renderer:
         # 视角方向 (如果需要)
         view_dirs = rays_d if self.use_viewdirs else None
         
-        # 1. Coarse Sampling
-        t_vals = self._sample_coarse(rays_o.shape[0])
-        pts = rays_o[..., None, :] + rays_d[..., None, :] * t_vals[..., :, None]  # [N_rays, N_samples, 3]
-
-        # 2. Query Coarse Network
-        raw = self._query_network(pts, view_dirs, self.coarse_model)
+        # 分块处理光线以避免OOM
+        N_rays = rays_o.shape[0]
+        ray_chunk_size = 1024  # 减小chunk size
+        all_ret = {}
         
-        # 3. Volume Rendering for Coarse Pass
-        rgb_map_0, disp_map_0, acc_map_0, weights, depth_map_0 = self._raw2outputs(raw, t_vals, rays_d)
-
-        ret = {'rgb_map_0': rgb_map_0, 'disp_map_0': disp_map_0, 'acc_map_0': acc_map_0, 'depth_map_0': depth_map_0}
-
-        # 4. Hierarchical Sampling (Fine Pass)
-        if self.N_importance > 0:
-            # 4.1. Importance Sampling
-            t_vals_mid = .5 * (t_vals[..., 1:] + t_vals[..., :-1])
-            t_vals_fine = self._sample_fine(t_vals_mid, weights[..., 1:-1])
-            t_vals, _ = torch.sort(torch.cat([t_vals, t_vals_fine], -1), -1)
-            pts_fine = rays_o[..., None, :] + rays_d[..., None, :] * t_vals[..., :, None]
-
-            # 4.2. Query Fine Network
-            raw_fine = self._query_network(pts_fine, view_dirs, self.fine_model)
+        for i in range(0, N_rays, ray_chunk_size):
+            rays_o_chunk = rays_o[i:i+ray_chunk_size]
+            rays_d_chunk = rays_d[i:i+ray_chunk_size]
+            view_dirs_chunk = view_dirs[i:i+ray_chunk_size] if view_dirs is not None else None
             
-            # 4.3. Volume Rendering for Fine Pass
-            rgb_map, disp_map, acc_map, _, depth_map = self._raw2outputs(raw_fine, t_vals, rays_d)
-            
-            ret['rgb_map'] = rgb_map
-            ret['disp_map'] = disp_map
-            ret['acc_map'] = acc_map
-            ret['depth_map'] = depth_map
+            # 1. Coarse Sampling
+            t_vals = self._sample_coarse(rays_o_chunk.shape[0])
+            pts = rays_o_chunk[..., None, :] + rays_d_chunk[..., None, :] * t_vals[..., :, None]  # [N_rays_chunk, N_samples, 3]
 
-        return ret
+            # 2. Query Coarse Network
+            raw = self._query_network(pts, view_dirs_chunk, self.coarse_model)
+            
+            # 3. Volume Rendering for Coarse Pass
+            rgb_map_0, disp_map_0, acc_map_0, weights, depth_map_0 = self._raw2outputs(raw, t_vals, rays_d_chunk)
+
+            ret = {'rgb_map_0': rgb_map_0, 'disp_map_0': disp_map_0, 'acc_map_0': acc_map_0, 'depth_map_0': depth_map_0}
+
+            # 4. Hierarchical Sampling (Fine Pass)
+            if self.N_importance > 0:
+                # 4.1. Importance Sampling
+                t_vals_mid = .5 * (t_vals[..., 1:] + t_vals[..., :-1])
+                t_vals_fine = self._sample_fine(t_vals_mid, weights[..., 1:-1])
+                t_vals, _ = torch.sort(torch.cat([t_vals, t_vals_fine], -1), -1)
+                pts_fine = rays_o_chunk[..., None, :] + rays_d_chunk[..., None, :] * t_vals[..., :, None]
+
+                # 4.2. Query Fine Network
+                raw_fine = self._query_network(pts_fine, view_dirs_chunk, self.fine_model)
+                
+                # 4.3. Volume Rendering for Fine Pass
+                rgb_map, disp_map, acc_map, _, depth_map = self._raw2outputs(raw_fine, t_vals, rays_d_chunk)
+                
+                ret['rgb_map'] = rgb_map
+                ret['disp_map'] = disp_map
+                ret['acc_map'] = acc_map
+                ret['depth_map'] = depth_map
+            
+            # 收集结果
+            for k, v in ret.items():
+                if k not in all_ret:
+                    all_ret[k] = []
+                all_ret[k].append(v)
+        
+        # 拼接所有chunks的结果
+        for k, v in all_ret.items():
+            all_ret[k] = torch.cat(v, 0)
+            # 重新reshape为图像形状
+            if 'map' in k:
+                if k in ['rgb_map', 'rgb_map_0']:
+                    all_ret[k] = all_ret[k].view(H, W, 3)
+                else:
+                    all_ret[k] = all_ret[k].view(H, W)
+
+        return all_ret
 
     def _sample_coarse(self, N_rays):
         """Stratified sampling along rays."""
