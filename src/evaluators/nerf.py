@@ -139,6 +139,16 @@ class Evaluator:
         result_dir = os.path.join(cfg.result_dir, "metrics")
         os.system("mkdir -p {}".format(result_dir))
         
+        # 转换所有图像数据为JSON可序列化的格式
+        per_image_results = []
+        for img_data in self.imgs:
+            per_image_results.append({
+                'id': int(img_data['id']),
+                'mse': float(img_data['mse']),
+                'psnr': float(img_data['psnr']),
+                'ssim': float(img_data['ssim'])
+            })
+        
         results = {
             'summary': {
                 'num_images': len(self.psnr),
@@ -149,7 +159,7 @@ class Evaluator:
                 'std_psnr': float(std_psnr),
                 'std_ssim': float(std_ssim)
             },
-            'per_image': self.imgs
+            'per_image': per_image_results
         }
         
         json_path = os.path.join(result_dir, "evaluation_results.json")
@@ -169,7 +179,7 @@ class Evaluator:
         print(f"Images saved to: {os.path.join(cfg.result_dir, 'images')}")
         
         return {
-            'avg_psnr': avg_psnr,
-            'avg_ssim': avg_ssim,
-            'avg_mse': avg_mse
+            'avg_psnr': float(avg_psnr),
+            'avg_ssim': float(avg_ssim),
+            'avg_mse': float(avg_mse)
         }
