@@ -40,8 +40,37 @@ class Renderer:
         This function is responsible for rendering the output of the model, which includes the RGB values and the depth values.
         The detailed rendering process is described in the paper.
         """
-        rays_o, rays_d = batch['rays_o'], batch['rays_d']
-        view_dirs = batch['view_dirs'] if self.use_viewdirs else None
+        
+        # 从batch中获取相机参数
+        H, W = int(batch['H']), int(batch['W'])
+        pose = batch['pose'].squeeze(0)  # [4, 4]
+        intrinsics = batch['intrinsics'].squeeze(0)  # [3, 3]
+        
+        # 生成像素坐标网格
+        i, j = torch.meshgrid(torch.linspace(0, W-1, W, device=self.device), 
+                             torch.linspace(0, H-1, H, device=self.device), indexing='ij')
+        i = i.t()  # [H, W]
+        j = j.t()  # [H, W]
+        
+        # 从像素坐标计算光线方向 (相机坐标系)
+        dirs = torch.stack([(i - intrinsics[0, 2]) / intrinsics[0, 0],
+                           -(j - intrinsics[1, 2]) / intrinsics[1, 1],
+                           -torch.ones_like(i)], -1)  # [H, W, 3]
+        
+        # 变换到世界坐标系
+        # pose[:3, :3] 是旋转矩阵, pose[:3, 3] 是平移向量
+        rays_d = torch.sum(dirs[..., np.newaxis, :] * pose[:3, :3], -1)  # [H, W, 3]
+        rays_o = pose[:3, 3].expand(rays_d.shape)  # [H, W, 3]
+        
+        # 展平为 [H*W, 3]
+        rays_o = rays_o.view(-1, 3)
+        rays_d = rays_d.view(-1, 3)
+        
+        # 归一化光线方向
+        rays_d = rays_d / torch.norm(rays_d, dim=-1, keepdim=True)
+        
+        # 视角方向 (如果需要)
+        view_dirs = rays_d if self.use_viewdirs else None
         
         # 1. Coarse Sampling
         t_vals = self._sample_coarse(rays_o.shape[0])
