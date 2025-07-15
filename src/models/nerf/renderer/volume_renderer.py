@@ -159,7 +159,8 @@ class Renderer:
         cdf = torch.cumsum(pdf, -1)
         cdf = torch.cat([torch.zeros_like(cdf[..., :1]), cdf], -1)
         
-        if self.training:
+        # 检查网络的训练状态而不是renderer的训练状态
+        if self.net.training:
             u = torch.rand(list(cdf.shape[:-1]) + [self.N_importance], device=self.device)
         else:
             u = torch.linspace(0., 1., steps=self.N_importance, device=self.device)
