@@ -74,7 +74,7 @@ class Renderer:
         
         # 分块处理光线以避免OOM
         N_rays = rays_o.shape[0]
-        ray_chunk_size = 1024  # 减小chunk size
+        ray_chunk_size = 2048  # 减小chunk size
         all_ret = {}
         
         for i in range(0, N_rays, ray_chunk_size):
