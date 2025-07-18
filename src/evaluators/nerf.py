@@ -24,17 +24,41 @@ class Evaluator:
     def psnr_metric(self, img_pred, img_gt):
         """
         计算PSNR值
-        假设输入图像已经归一化到[0,1]范围
+        检查并处理图像的数值范围
         """
+        # 调试：检查图像的数值范围
+        print(f"DEBUG - img_pred range: [{img_pred.min():.6f}, {img_pred.max():.6f}]")
+        print(f"DEBUG - img_gt range: [{img_gt.min():.6f}, {img_gt.max():.6f}]")
+        
+        # 检查图像是否在[0,1]范围内
+        pred_in_01 = (img_pred.min() >= 0) and (img_pred.max() <= 1)
+        gt_in_01 = (img_gt.min() >= 0) and (img_gt.max() <= 1)
+        
+        if not pred_in_01 or not gt_in_01:
+            print(f"WARNING: Images not in [0,1] range!")
+            print(f"  Predicted image in [0,1]: {pred_in_01}")
+            print(f"  Ground truth image in [0,1]: {gt_in_01}")
+            
+            # 如果图像在[0,255]范围，自动归一化
+            if img_pred.max() > 1.0:
+                print("  Auto-normalizing predicted image from [0,255] to [0,1]")
+                img_pred = img_pred / 255.0
+            if img_gt.max() > 1.0:
+                print("  Auto-normalizing ground truth image from [0,255] to [0,1]")
+                img_gt = img_gt / 255.0
+        
         mse = np.mean((img_pred - img_gt) ** 2)
+        print(f"DEBUG - MSE: {mse:.8f}")
+        
         if mse == 0:
             return float('inf')  # 如果MSE为0，PSNR为无穷大
         
         # 对于归一化到[0,1]的图像，MAX_I = 1
         max_pixel_value = 1.0
         psnr = 20 * np.log10(max_pixel_value) - 10 * np.log10(mse)
-        # 等价于: psnr = 10 * np.log10(max_pixel_value**2 / mse)
-        # 由于max_pixel_value=1，所以: psnr = -10 * np.log10(mse)
+        # 由于max_pixel_value=1，所以简化为: psnr = -10 * np.log10(mse)
+        
+        print(f"DEBUG - PSNR: {psnr:.2f} dB")
         
         return psnr
 
@@ -117,6 +141,11 @@ class Evaluator:
         # 重新reshape预测图像为[H, W, 3]
         if rgb_pred.shape[0] == H * W:
             rgb_pred = rgb_pred.reshape(H, W, 3)
+        
+        # 调试：输出原始数据范围（在clip之前）
+        print(f"\nImage {self.img_count + 1} - Original data ranges:")
+        print(f"  rgb_pred shape: {rgb_pred.shape}, range: [{rgb_pred.min():.6f}, {rgb_pred.max():.6f}]")
+        print(f"  img_gt shape: {img_gt.shape}, range: [{img_gt.min():.6f}, {img_gt.max():.6f}]")
         
         # 确保值在[0, 1]范围内
         rgb_pred = np.clip(rgb_pred, 0, 1)
