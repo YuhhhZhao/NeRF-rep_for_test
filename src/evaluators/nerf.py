@@ -22,26 +22,65 @@ class Evaluator:
         self.img_count = 0
 
     def psnr_metric(self, img_pred, img_gt):
+        """
+        计算PSNR值
+        假设输入图像已经归一化到[0,1]范围
+        """
         mse = np.mean((img_pred - img_gt) ** 2)
-        psnr = -10 * np.log(mse) / np.log(10)
+        if mse == 0:
+            return float('inf')  # 如果MSE为0，PSNR为无穷大
+        
+        # 对于归一化到[0,1]的图像，MAX_I = 1
+        max_pixel_value = 1.0
+        psnr = 20 * np.log10(max_pixel_value) - 10 * np.log10(mse)
+        # 等价于: psnr = 10 * np.log10(max_pixel_value**2 / mse)
+        # 由于max_pixel_value=1，所以: psnr = -10 * np.log10(mse)
+        
         return psnr
 
     def ssim_metric(self, img_pred, img_gt, batch, id, num_imgs):
         result_dir = os.path.join(cfg.result_dir, "images")
         os.system("mkdir -p {}".format(result_dir))
+        
+        # 保存图像（BGR格式用于OpenCV）
         cv2.imwrite(
             "{}/view{:03d}_pred.png".format(result_dir, id),
-            (img_pred[..., [2, 1, 0]] * 255),
+            (img_pred[..., [2, 1, 0]] * 255).astype(np.uint8),
         )
         cv2.imwrite(
             "{}/view{:03d}_gt.png".format(result_dir, id),
-            (img_gt[..., [2, 1, 0]] * 255),
+            (img_gt[..., [2, 1, 0]] * 255).astype(np.uint8),
         )
-        img_pred_uint8 = (img_pred * 255).astype(np.uint8)
-        img_gt_uint8 = (img_gt * 255).astype(np.uint8)
-
-        ssim = compare_ssim(img_pred_uint8, img_gt_uint8, win_size=101, full=True, multichannel=True, channel_axis=2)
-        return ssim[0] if isinstance(ssim, tuple) else ssim
+        
+        # 确保图像在[0,1]范围内用于SSIM计算
+        img_pred_clipped = np.clip(img_pred, 0, 1)
+        img_gt_clipped = np.clip(img_gt, 0, 1)
+        
+        # 计算SSIM（使用[0,1]范围的float数据）
+        try:
+            ssim_value = compare_ssim(
+                img_pred_clipped, 
+                img_gt_clipped, 
+                win_size=min(7, min(img_pred.shape[0], img_pred.shape[1])),  # 动态窗口大小
+                data_range=1.0,  # 数据范围为0-1
+                multichannel=True,
+                channel_axis=2
+            )
+        except Exception as e:
+            print(f"SSIM calculation failed: {e}")
+            # 如果失败，尝试使用uint8格式
+            img_pred_uint8 = (img_pred_clipped * 255).astype(np.uint8)
+            img_gt_uint8 = (img_gt_clipped * 255).astype(np.uint8)
+            ssim_value = compare_ssim(
+                img_pred_uint8, 
+                img_gt_uint8, 
+                win_size=7,
+                data_range=255,
+                multichannel=True,
+                channel_axis=2
+            )
+        
+        return ssim_value
 
     def evaluate(self, output, batch):
         """
