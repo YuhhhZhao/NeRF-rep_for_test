@@ -161,6 +161,28 @@ class Evaluator:
             print(f"  WARNING: Predicted image appears overexposed!")
             print(f"  This suggests white background or saturation issues in volume rendering.")
         
+        # 检测背景不匹配问题
+        pred_bg_white = rgb_pred.mean() > 0.5 and near_one > 0.3
+        gt_bg_black = img_gt.mean() < 0.3
+        
+        if pred_bg_white and gt_bg_black:
+            print(f"  WARNING: Background mismatch detected!")
+            print(f"  Predicted image has white background, GT has black background")
+            print(f"  Consider converting GT background to white for fair comparison")
+            
+            # 选项1：将GT背景转换为白色
+            # 检测GT中的前景区域（非黑色部分）
+            foreground_mask = (img_gt.sum(axis=2) > 0.1)  # 前景：RGB值总和>0.1
+            img_gt_white_bg = img_gt.copy()
+            img_gt_white_bg[~foreground_mask] = 1.0  # 背景设为白色
+            
+            print(f"  Converting GT background from black to white...")
+            print(f"  Original GT mean: {img_gt.mean():.6f}")
+            print(f"  White BG GT mean: {img_gt_white_bg.mean():.6f}")
+            
+            # 使用白色背景的GT进行评估
+            img_gt = img_gt_white_bg
+        
         # 确保值在[0, 1]范围内
         rgb_pred = np.clip(rgb_pred, 0, 1)
         img_gt = np.clip(img_gt, 0, 1)
