@@ -147,6 +147,15 @@ class Evaluator:
         print(f"  rgb_pred shape: {rgb_pred.shape}, range: [{rgb_pred.min():.6f}, {rgb_pred.max():.6f}]")
         print(f"  img_gt shape: {img_gt.shape}, range: [{img_gt.min():.6f}, {img_gt.max():.6f}]")
         
+        # 检查预测图像的统计信息
+        print(f"  rgb_pred mean: {rgb_pred.mean():.6f}, std: {rgb_pred.std():.6f}")
+        print(f"  img_gt mean: {img_gt.mean():.6f}, std: {img_gt.std():.6f}")
+        
+        # 检查是否大部分像素都是0（黑色）或1（白色）
+        near_zero = (rgb_pred < 0.1).sum() / rgb_pred.size
+        near_one = (rgb_pred > 0.9).sum() / rgb_pred.size
+        print(f"  rgb_pred: {near_zero:.2%} pixels near 0, {near_one:.2%} pixels near 1")
+        
         # 确保值在[0, 1]范围内
         rgb_pred = np.clip(rgb_pred, 0, 1)
         img_gt = np.clip(img_gt, 0, 1)
