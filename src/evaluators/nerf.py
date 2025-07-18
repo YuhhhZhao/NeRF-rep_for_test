@@ -285,3 +285,50 @@ class Evaluator:
             'avg_ssim': float(avg_ssim),
             'avg_mse': float(avg_mse)
         }
+    
+    def render_video_if_needed(self, renderer, dataset, iteration=0):
+        """
+        根据配置渲染视频
+        
+        Args:
+            renderer: volume renderer instance
+            dataset: test dataset
+            iteration: current iteration number
+        """
+        # 检查是否需要渲染视频
+        if not cfg.write_video:
+            return
+        
+        print(f"Rendering video at iteration {iteration}...")
+        
+        # 获取数据集的poses和相机参数
+        poses = dataset.poses  # [N, 4, 4]
+        
+        # 获取图像尺寸和焦距
+        H, W = dataset.H, dataset.W
+        focal = dataset.focal
+        hwf = [H, W, focal]
+        
+        # 构造相机内参
+        intrinsics = torch.tensor([
+            [focal, 0, W / 2],
+            [0, focal, H / 2],
+            [0, 0, 1]
+        ], dtype=torch.float32)
+        
+        # 设置输出路径
+        output_dir = os.path.join(cfg.result_dir, "videos")
+        exp_name = cfg.exp_name
+        
+        # 渲染视频
+        renderer.render_video(
+            poses=poses,
+            hwf=hwf,
+            output_dir=output_dir,
+            exp_name=exp_name,
+            iteration=iteration,
+            intrinsics=intrinsics,
+            render_type='spiral'
+        )
+        
+        print(f"Video rendering completed!")

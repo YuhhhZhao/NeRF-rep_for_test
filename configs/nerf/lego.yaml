@@ -81,3 +81,9 @@ save_ep: 40
 eval_ep: 40 # 20000 iterations
 save_latest_ep: 10 # 5000 iterations
 log_interval: 10
+
+# video rendering settings
+write_video: True # enable video rendering
+render_path: True # render camera path
+fps: 24 # video fps
+render_num: 120 # number of frames to render

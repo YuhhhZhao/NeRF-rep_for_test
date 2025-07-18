@@ -76,6 +76,14 @@ def run_evaluate():
             end_time = time.time()
         net_time.append(end_time - start_time)
         evaluator.evaluate(output, batch)
+    
+    # 渲染视频（如果配置中启用了）
+    if hasattr(cfg, 'write_video') and cfg.write_video:
+        print("\nRendering video...")
+        # 获取数据集用于视频渲染
+        dataset = data_loader.dataset
+        evaluator.render_video_if_needed(renderer, dataset, iteration=0)
+    
     evaluator.summarize()
     if len(net_time) > 1:
         print("net_time: ", np.mean(net_time[1:]))

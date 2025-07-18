@@ -1,6 +1,10 @@
 import numpy as np
 import torch
 from src.config import cfg
+import imageio
+import os
+from tqdm import tqdm
+import cv2
 
 
 class Renderer:
@@ -271,3 +275,226 @@ class Renderer:
         # 如果不使用白色背景，保持原始体积渲染结果（黑色背景）
 
         return rgb_map, disp_map, acc_map, weights, depth_map
+
+    def generate_spiral_poses(self, poses, n_frames=None, n_rots=2, zrate=0.5):
+        """
+        Generate spiral camera path for video rendering
+        
+        Args:
+            poses: [N, 4, 4] camera poses from dataset
+            n_frames: number of frames (uses cfg.render_num if None)
+            n_rots: number of rotations
+            zrate: rate of up-down movement
+            
+        Returns:
+            render_poses: [n_frames, 4, 4] spiral camera poses
+        """
+        if n_frames is None:
+            n_frames = cfg.render_num
+            
+        poses = poses.cpu().numpy() if torch.is_tensor(poses) else poses
+        
+        # 计算相机位置的统计信息
+        positions = poses[:, :3, 3]  # [N, 3]
+        center = np.mean(positions, axis=0)
+        
+        # 计算相机的平均朝向和上向量
+        forward = np.mean(poses[:, :3, 2], axis=0)
+        forward = forward / np.linalg.norm(forward)
+        
+        up = np.mean(poses[:, :3, 1], axis=0)
+        up = up / np.linalg.norm(up)
+        
+        right = np.cross(forward, up)
+        right = right / np.linalg.norm(right)
+        up = np.cross(right, forward)
+        
+        # 计算相机到中心的距离
+        distances = np.linalg.norm(positions - center, axis=1)
+        radius = np.mean(distances)
+        
+        # 生成螺旋路径
+        render_poses = []
+        
+        for i in range(n_frames):
+            theta = 2 * np.pi * n_rots * i / n_frames
+            phi = zrate * np.sin(2 * np.pi * i / n_frames)
+            
+            # 计算相机位置
+            cam_pos = center + radius * (np.cos(theta) * right + np.sin(theta) * forward) + phi * up
+            
+            # 计算相机朝向（朝向中心）
+            cam_forward = center - cam_pos
+            cam_forward = cam_forward / np.linalg.norm(cam_forward)
+            
+            cam_right = np.cross(cam_forward, up)
+            cam_right = cam_right / np.linalg.norm(cam_right)
+            
+            cam_up = np.cross(cam_right, cam_forward)
+            
+            # 构造相机变换矩阵
+            pose = np.eye(4)
+            pose[:3, 0] = cam_right
+            pose[:3, 1] = cam_up
+            pose[:3, 2] = cam_forward
+            pose[:3, 3] = cam_pos
+            
+            render_poses.append(pose)
+            
+        return np.array(render_poses)
+    
+    def render_path(self, render_poses, hwf, intrinsics=None, chunk_size=None):
+        """
+        Render RGB and depth maps for a path of camera poses
+        
+        Args:
+            render_poses: [N, 4, 4] camera poses
+            hwf: [H, W, focal] image dimensions and focal length
+            intrinsics: [3, 3] camera intrinsics (optional)
+            chunk_size: batch size for rendering (optional)
+            
+        Returns:
+            rgbs: [N, H, W, 3] rendered RGB images
+            disps: [N, H, W] disparity maps
+        """
+        H, W, focal = hwf
+        
+        if intrinsics is None:
+            # 构造默认相机内参
+            intrinsics = torch.tensor([
+                [focal, 0, W / 2],
+                [0, focal, H / 2],
+                [0, 0, 1]
+            ], dtype=torch.float32, device=self.device)
+        
+        rgbs = []
+        disps = []
+        
+        print(f"Rendering path with {len(render_poses)} poses...")
+        
+        with torch.no_grad():
+            for i, pose in enumerate(tqdm(render_poses, desc="Rendering")):
+                # 转换为tensor
+                pose_tensor = torch.from_numpy(pose).float().to(self.device)
+                intrinsics_tensor = intrinsics.to(self.device)
+                
+                # 构造batch
+                batch = {
+                    'pose': pose_tensor.unsqueeze(0),
+                    'intrinsics': intrinsics_tensor.unsqueeze(0),
+                    'H': H,
+                    'W': W,
+                }
+                
+                # 渲染
+                try:
+                    ret = self.render(batch)
+                    
+                    # 获取渲染结果
+                    if 'rgb_map' in ret:
+                        rgb_map = ret['rgb_map']
+                        disp_map = ret['disp_map']
+                    else:
+                        rgb_map = ret['rgb_map_0']
+                        disp_map = ret['disp_map_0']
+                    
+                    # 转换为numpy
+                    rgb_np = rgb_map.cpu().numpy()
+                    disp_np = disp_map.cpu().numpy()
+                    
+                    # 确保在[0,1]范围内
+                    rgb_np = np.clip(rgb_np, 0, 1)
+                    disp_np = np.clip(disp_np, 0, np.max(disp_np))
+                    
+                    rgbs.append(rgb_np)
+                    disps.append(disp_np)
+                    
+                except Exception as e:
+                    print(f"Error rendering frame {i}: {e}")
+                    # 创建黑色帧作为备用
+                    rgbs.append(np.zeros((H, W, 3), dtype=np.float32))
+                    disps.append(np.zeros((H, W), dtype=np.float32))
+        
+        return np.array(rgbs), np.array(disps)
+    
+    def render_video(self, poses, hwf, output_dir, exp_name, iteration=0, 
+                    intrinsics=None, render_type='spiral'):
+        """
+        Render and save video using NeRF-style approach
+        
+        Args:
+            poses: [N, 4, 4] camera poses from dataset
+            hwf: [H, W, focal] image dimensions and focal length
+            output_dir: output directory for videos
+            exp_name: experiment name for file naming
+            iteration: current iteration number
+            intrinsics: camera intrinsics (optional)
+            render_type: 'spiral' or 'path'
+        """
+        print(f"Rendering video - Type: {render_type}")
+        
+        # 生成渲染路径
+        if render_type == 'spiral':
+            render_poses = self.generate_spiral_poses(poses, n_frames=cfg.render_num)
+        else:
+            # 使用原始poses
+            render_poses = poses.cpu().numpy() if torch.is_tensor(poses) else poses
+        
+        # 渲染路径
+        rgbs, disps = self.render_path(render_poses, hwf, intrinsics)
+        
+        print(f'Done rendering, saving videos with shape: RGB {rgbs.shape}, Disp {disps.shape}')
+        
+        # 创建输出目录
+        os.makedirs(output_dir, exist_ok=True)
+        
+        # 文件名模板（参考NeRF代码）
+        moviebase = os.path.join(output_dir, f'{exp_name}_spiral_{iteration:06d}_')
+        
+        # 转换为8位格式的辅助函数
+        def to8b(x):
+            return (255 * np.clip(x, 0, 1)).astype(np.uint8)
+        
+        try:
+            # 保存RGB视频
+            rgb_video_path = moviebase + 'rgb.mp4'
+            imageio.mimwrite(rgb_video_path, to8b(rgbs), fps=cfg.fps, quality=8)
+            print(f'RGB video saved: {rgb_video_path}')
+            
+            # 保存深度视频
+            disp_video_path = moviebase + 'disp.mp4'
+            disp_normalized = disps / np.max(disps) if np.max(disps) > 0 else disps
+            imageio.mimwrite(disp_video_path, to8b(disp_normalized), fps=cfg.fps, quality=8)
+            print(f'Disparity video saved: {disp_video_path}')
+            
+            # 保存一些关键帧图像用于调试
+            frame_dir = os.path.join(output_dir, 'frames')
+            os.makedirs(frame_dir, exist_ok=True)
+            
+            # 保存第一帧、中间帧和最后一帧
+            key_frames = [0, len(rgbs)//2, len(rgbs)-1]
+            for i in key_frames:
+                rgb_frame_path = os.path.join(frame_dir, f'frame_{i:04d}_rgb.png')
+                disp_frame_path = os.path.join(frame_dir, f'frame_{i:04d}_disp.png')
+                
+                cv2.imwrite(rgb_frame_path, to8b(rgbs[i])[..., [2, 1, 0]])  # BGR for OpenCV
+                cv2.imwrite(disp_frame_path, to8b(disp_normalized[i]))
+            
+            print(f'Key frames saved to: {frame_dir}')
+            
+        except Exception as e:
+            print(f'Error saving videos: {e}')
+            print('Falling back to saving individual frames...')
+            
+            # 备用方案：保存所有帧
+            frames_dir = os.path.join(output_dir, 'all_frames')
+            os.makedirs(frames_dir, exist_ok=True)
+            
+            for i in range(len(rgbs)):
+                rgb_frame_path = os.path.join(frames_dir, f'rgb_{i:04d}.png')
+                disp_frame_path = os.path.join(frames_dir, f'disp_{i:04d}.png')
+                
+                cv2.imwrite(rgb_frame_path, to8b(rgbs[i])[..., [2, 1, 0]])
+                cv2.imwrite(disp_frame_path, to8b(disp_normalized[i]))
+            
+            print(f'All frames saved to: {frames_dir}')
