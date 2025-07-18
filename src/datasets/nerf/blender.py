@@ -55,6 +55,26 @@ class Dataset(data.Dataset):
                 # 转换为torch tensor
                 img = torch.from_numpy(img).float()
                 img = img / 255.0
+                
+                # 处理透明背景 - 根据NeRF源代码逻辑
+                if img.shape[-1] == 4:  # 如果有alpha通道
+                    # 检查是否使用白色背景（从配置中获取）
+                    white_bkgd = getattr(cfg, 'white_bkgd', True)
+                    if hasattr(cfg, 'task_arg') and hasattr(cfg.task_arg, 'white_bkgd'):
+                        white_bkgd = cfg.task_arg.white_bkgd
+                    
+                    if white_bkgd:
+                        # 将透明背景合成为白色背景
+                        # 公式：RGB = RGB * alpha + 白色 * (1-alpha)
+                        rgb = img[..., :3]  # RGB通道
+                        alpha = img[..., -1:]  # alpha通道
+                        img = rgb * alpha + (1.0 - alpha)  # 合成白色背景
+                    else:
+                        img = img[..., :3]  # 只取RGB通道，忽略alpha
+                else:
+                    # 如果没有alpha通道，直接使用RGB
+                    img = img[..., :3]
+                
                 if img.shape[:2] != (self.H, self.W):
                     # 需要调整维度顺序: [H, W, C] -> [C, H, W] -> [1, C, H, W]
                     img = img.permute(2, 0, 1).unsqueeze(0)  # [1, C, H, W]

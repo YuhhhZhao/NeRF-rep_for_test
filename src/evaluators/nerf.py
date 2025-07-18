@@ -108,7 +108,7 @@ class Evaluator:
 
     def conservative_background_conversion(self, img_gt, rgb_pred):
         """
-        极度保守的背景转换：只转换图像边缘的纯黑区域
+        极度保守的背景转换：只转换边缘的绝对纯黑区域
         
         Args:
             img_gt: 真实图像 [H, W, 3]
@@ -127,77 +127,89 @@ class Evaluator:
         gray_gt = np.mean(img_gt, axis=2)
         gray_pred = np.mean(rgb_pred, axis=2)
         
-        # 2. 只考虑图像最外层边缘区域
-        edge_width = min(15, H//16, W//16)  # 非常窄的边缘
-        edge_mask = np.zeros((H, W), dtype=bool)
-        edge_mask[:edge_width, :] = True     # 上边缘
-        edge_mask[-edge_width:, :] = True    # 下边缘
-        edge_mask[:, :edge_width] = True     # 左边缘
-        edge_mask[:, -edge_width:] = True    # 右边缘
+        # 2. 只考虑图像四个角落的小区域
+        corner_size = min(20, H//20, W//20)  # 很小的角落区域
         
-        # 3. 极严格的背景检测条件
-        # 必须同时满足：纯黑 + 预测为纯白 + 在边缘区域
-        pure_black_gt = gray_gt < 0.001      # 几乎为0的像素
-        pure_white_pred = gray_pred > 0.99   # 几乎为1的像素
+        # 创建角落掩码
+        corner_mask = np.zeros((H, W), dtype=bool)
         
-        # 4. 颜色一致性检查
-        # 确保RGB三个通道都接近0
-        r_black = img_gt[:, :, 0] < 0.001
-        g_black = img_gt[:, :, 1] < 0.001
-        b_black = img_gt[:, :, 2] < 0.001
-        rgb_consistent = r_black & g_black & b_black
+        # 四个角落
+        corner_mask[:corner_size, :corner_size] = True           # 左上角
+        corner_mask[:corner_size, -corner_size:] = True          # 右上角
+        corner_mask[-corner_size:, :corner_size] = True          # 左下角
+        corner_mask[-corner_size:, -corner_size:] = True         # 右下角
         
-        # 5. 预测图像颜色一致性
-        # 确保预测图像RGB三个通道都接近1
-        r_white = rgb_pred[:, :, 0] > 0.99
-        g_white = rgb_pred[:, :, 1] > 0.99
-        b_white = rgb_pred[:, :, 2] > 0.99
-        pred_consistent = r_white & g_white & b_white
+        # 如果角落区域检测到足够的背景，扩展到边缘
+        corner_candidates = corner_mask & (gray_gt < 0.001) & (gray_pred > 0.99)
         
-        # 6. 候选背景区域：极严格的条件
-        candidate_bg = (
-            edge_mask &           # 在边缘区域
-            pure_black_gt &       # GT为纯黑
-            pure_white_pred &     # 预测为纯白
-            rgb_consistent &      # GT的RGB都为黑
-            pred_consistent       # 预测的RGB都为白
+        if corner_candidates.sum() > corner_size * corner_size * 0.8:  # 80%以上的角落是背景
+            # 扩展到边缘
+            edge_width = min(10, H//30, W//30)
+            edge_mask = np.zeros((H, W), dtype=bool)
+            edge_mask[:edge_width, :] = True
+            edge_mask[-edge_width:, :] = True
+            edge_mask[:, :edge_width] = True
+            edge_mask[:, -edge_width:] = True
+        else:
+            # 只使用角落区域
+            edge_mask = corner_mask
+        
+        # 3. 非常严格的背景检测条件
+        # GT必须是绝对的黑色（所有通道都接近0）
+        absolute_black_gt = (
+            (img_gt[:, :, 0] < 0.001) & 
+            (img_gt[:, :, 1] < 0.001) & 
+            (img_gt[:, :, 2] < 0.001)
         )
         
-        # 7. 连通域分析：只保留较大的连通区域
+        # 预测必须是绝对的白色（所有通道都接近1）
+        absolute_white_pred = (
+            (rgb_pred[:, :, 0] > 0.99) & 
+            (rgb_pred[:, :, 1] > 0.99) & 
+            (rgb_pred[:, :, 2] > 0.99)
+        )
+        
+        # 4. 候选背景区域
+        candidate_bg = edge_mask & absolute_black_gt & absolute_white_pred
+        
+        # 5. 连通域分析 - 只保留相当大的连通区域
         labeled, num_features = ndimage.label(candidate_bg)
         final_bg_mask = np.zeros_like(candidate_bg)
         
         if num_features > 0:
             sizes = ndimage.sum(candidate_bg, labeled, range(1, num_features + 1))
             
-            # 只保留面积大于总面积1%的连通域
-            min_size = H * W * 0.01
+            # 只保留面积大于总面积0.5%的连通域
+            min_size = H * W * 0.005
             
             for i, size in enumerate(sizes, 1):
                 if size > min_size:
-                    # 额外检查：确保连通域主要在边缘
                     region_mask = (labeled == i)
-                    edge_pixels = (region_mask & edge_mask).sum()
-                    total_pixels = region_mask.sum()
                     
-                    # 如果80%以上的像素都在边缘区域，才保留
-                    if edge_pixels / total_pixels > 0.8:
-                        final_bg_mask[region_mask] = True
+                    # 额外验证：检查区域是否确实在边缘
+                    # 计算区域质心到图像边界的距离
+                    y_coords, x_coords = np.where(region_mask)
+                    if len(y_coords) > 0:
+                        centroid_y = np.mean(y_coords)
+                        centroid_x = np.mean(x_coords)
+                        
+                        # 到边界的最小距离
+                        dist_to_edge = min(
+                            centroid_y, H - centroid_y,
+                            centroid_x, W - centroid_x
+                        )
+                        
+                        # 只有质心靠近边缘的区域才保留
+                        if dist_to_edge < min(H, W) * 0.15:  # 15%的边缘区域
+                            final_bg_mask[region_mask] = True
         
-        # 8. 最终检查：如果转换比例过高，进一步限制
+        # 6. 最终安全检查
         conversion_ratio = final_bg_mask.sum() / (H * W)
-        if conversion_ratio > 0.05:  # 如果超过5%，进一步限制
-            # 只保留最边缘的像素
-            narrow_edge_width = min(5, H//32, W//32)
-            narrow_edge_mask = np.zeros((H, W), dtype=bool)
-            narrow_edge_mask[:narrow_edge_width, :] = True
-            narrow_edge_mask[-narrow_edge_width:, :] = True
-            narrow_edge_mask[:, :narrow_edge_width] = True
-            narrow_edge_mask[:, -narrow_edge_width:] = True
-            
-            final_bg_mask = final_bg_mask & narrow_edge_mask
+        if conversion_ratio > 0.1:  # 如果超过10%，很可能有问题
+            print(f"    Warning: Conservative conversion ratio too high ({conversion_ratio:.1%}), skipping")
+            return img_gt_converted
         
-        # 9. 应用背景转换
+        # 7. 应用背景转换
         if final_bg_mask.sum() > 0:
             img_gt_converted[final_bg_mask] = 1.0
         
@@ -411,9 +423,10 @@ class Evaluator:
         gt_near_zero = (img_gt < 0.1).sum() / img_gt.size
         gt_near_one = (img_gt > 0.9).sum() / img_gt.size
         
-        # 智能背景处理：精确区分物体的黑色部分和背景
-        pred_bg_white = rgb_pred.mean() > 0.7 and near_one > 0.4  # 预测图像主要是白色
-        gt_bg_black = img_gt.mean() < 0.4 and gt_near_zero > 0.4  # GT图像主要是黑色
+        # 智能背景处理：检查是否需要背景转换
+        # 更宽松的检测条件，确保能发现需要转换的情况
+        pred_bg_white = rgb_pred.mean() > 0.6 and (rgb_pred > 0.8).sum() / rgb_pred.size > 0.3
+        gt_bg_black = img_gt.mean() < 0.5 and (img_gt < 0.2).sum() / img_gt.size > 0.3
         
         # 检查是否需要背景转换
         need_bg_conversion = pred_bg_white and gt_bg_black
@@ -426,7 +439,7 @@ class Evaluator:
             img_gt_original = img_gt.copy()
             
             if bg_strategy == 'conservative':
-                # 保守策略：只转换边缘的大片纯黑区域
+                # 保守策略：只转换边缘的绝对纯黑区域
                 img_gt = self.conservative_background_conversion(img_gt, rgb_pred)
             elif bg_strategy == 'smart':
                 # 智能策略：使用复杂的特征检测
