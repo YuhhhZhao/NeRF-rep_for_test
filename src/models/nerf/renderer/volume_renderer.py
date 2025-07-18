@@ -253,6 +253,5 @@ class Renderer:
             
             # 重新启用白色背景
             rgb_map = rgb_map + (1. - acc_map[..., None])
-            print("DEBUG - White background enabled")
 
         return rgb_map, disp_map, acc_map, weights, depth_map
