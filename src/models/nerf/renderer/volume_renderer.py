@@ -244,14 +244,10 @@ class Renderer:
         disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
         acc_map = torch.sum(weights, -1)
 
+        # 标准NeRF背景处理：根据配置文件设置添加背景颜色
         if self.white_bkgd:
-            # 调试：检查累积透明度的分布
-            # if torch.rand(1) < 0.01:  # 1%的概率打印调试信息
-            #     print(f"DEBUG - acc_map stats: min={acc_map.min():.4f}, max={acc_map.max():.4f}, mean={acc_map.mean():.4f}")
-            #     bg_contribution = (1. - acc_map).mean()
-            #     print(f"DEBUG - background contribution mean: {bg_contribution:.4f}")
-            
-            # 重新启用白色背景
+            # 白色背景：添加白色到未完全不透明的区域
             rgb_map = rgb_map + (1. - acc_map[..., None])
+        # 如果不使用白色背景，保持原始体积渲染结果（黑色背景）
 
         return rgb_map, disp_map, acc_map, weights, depth_map
