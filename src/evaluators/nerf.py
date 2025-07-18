@@ -143,30 +143,37 @@ class Evaluator:
             rgb_pred = rgb_pred.reshape(H, W, 3)
         
         # 调试：输出原始数据范围（在clip之前）
-        print(f"\nImage {self.img_count + 1} - Original data ranges:")
-        print(f"  rgb_pred shape: {rgb_pred.shape}, range: [{rgb_pred.min():.6f}, {rgb_pred.max():.6f}]")
-        print(f"  img_gt shape: {img_gt.shape}, range: [{img_gt.min():.6f}, {img_gt.max():.6f}]")
-        
-        # 检查预测图像的统计信息
-        print(f"  rgb_pred mean: {rgb_pred.mean():.6f}, std: {rgb_pred.std():.6f}")
-        print(f"  img_gt mean: {img_gt.mean():.6f}, std: {img_gt.std():.6f}")
+        # print(f"\nImage {self.img_count + 1} - Original data ranges:")
+        # print(f"  rgb_pred shape: {rgb_pred.shape}, range: [{rgb_pred.min():.6f}, {rgb_pred.max():.6f}]")
+        # print(f"  img_gt shape: {img_gt.shape}, range: [{img_gt.min():.6f}, {img_gt.max():.6f}]")
+        # 
+        # # 检查预测图像的统计信息
+        # print(f"  rgb_pred mean: {rgb_pred.mean():.6f}, std: {rgb_pred.std():.6f}")
+        # print(f"  img_gt mean: {img_gt.mean():.6f}, std: {img_gt.std():.6f}")
+        # 
+        # # 检查是否大部分像素都是0（黑色）或1（白色）
+        # near_zero = (rgb_pred < 0.1).sum() / rgb_pred.size
+        # near_one = (rgb_pred > 0.9).sum() / rgb_pred.size
+        # print(f"  rgb_pred: {near_zero:.2%} pixels near 0, {near_one:.2%} pixels near 1")
+        # 
+        # gt_near_zero = (img_gt < 0.1).sum() / img_gt.size
+        # gt_near_one = (img_gt > 0.9).sum() / img_gt.size
+        # print(f"  img_gt: {gt_near_zero:.2%} pixels near 0, {gt_near_one:.2%} pixels near 1")
         
         # 检查是否大部分像素都是0（黑色）或1（白色）
         near_zero = (rgb_pred < 0.1).sum() / rgb_pred.size
         near_one = (rgb_pred > 0.9).sum() / rgb_pred.size
-        print(f"  rgb_pred: {near_zero:.2%} pixels near 0, {near_one:.2%} pixels near 1")
         
         gt_near_zero = (img_gt < 0.1).sum() / img_gt.size
         gt_near_one = (img_gt > 0.9).sum() / img_gt.size
-        print(f"  img_gt: {gt_near_zero:.2%} pixels near 0, {gt_near_one:.2%} pixels near 1")
         
         # 检测背景不匹配问题
         pred_bg_white = rgb_pred.mean() > 0.5 and near_one > 0.3
         gt_bg_black = img_gt.mean() < 0.3
         
         if pred_bg_white and gt_bg_black:
-            print(f"  Background mismatch detected: pred=white, GT=black")
-            print(f"  Converting GT background to white for fair comparison...")
+            # print(f"  Background mismatch detected: pred=white, GT=black")
+            # print(f"  Converting GT background to white for fair comparison...")
             
             # 将GT背景转换为白色以匹配预测图像
             # 检测GT中的前景区域（非黑色部分）
@@ -174,12 +181,12 @@ class Evaluator:
             img_gt_white_bg = img_gt.copy()
             img_gt_white_bg[~foreground_mask] = 1.0  # 背景设为白色
             
-            print(f"  Original GT mean: {img_gt.mean():.4f} -> White BG GT mean: {img_gt_white_bg.mean():.4f}")
+            # print(f"  Original GT mean: {img_gt.mean():.4f} -> White BG GT mean: {img_gt_white_bg.mean():.4f}")
             
             # 使用白色背景的GT进行评估
             img_gt = img_gt_white_bg
-        elif near_one > 0.7:  
-            print(f"  INFO: High saturation detected ({near_one:.1%} pixels near white)")
+        # elif near_one > 0.7:  
+        #     print(f"  INFO: High saturation detected ({near_one:.1%} pixels near white)")
         
         # 确保值在[0, 1]范围内
         rgb_pred = np.clip(rgb_pred, 0, 1)
@@ -330,5 +337,34 @@ class Evaluator:
             intrinsics=intrinsics,
             render_type='spiral'
         )
+        
+        # 另外，如果存在评估结果图片，也创建对比视频
+        try:
+            result_images_dir = os.path.join(cfg.result_dir, 'images')
+            if os.path.exists(result_images_dir):
+                print("Creating videos from evaluation result images...")
+                
+                # 创建预测图片视频
+                pred_video_path = os.path.join(output_dir, f'{exp_name}_pred_sequence.mp4')
+                renderer.create_video_from_result_images(
+                    result_dir=cfg.result_dir,
+                    output_video_path=pred_video_path,
+                    image_type='pred',
+                    fps=cfg.fps
+                )
+                
+                # 创建对比视频
+                comparison_video_path = os.path.join(output_dir, f'{exp_name}_comparison.mp4')
+                renderer.create_video_from_result_images(
+                    result_dir=cfg.result_dir,
+                    output_video_path=comparison_video_path,
+                    image_type='both',
+                    fps=cfg.fps
+                )
+                
+                print("Evaluation result videos created successfully!")
+                
+        except Exception as e:
+            print(f"Error creating videos from evaluation results: {e}")
         
         print(f"Video rendering completed!")

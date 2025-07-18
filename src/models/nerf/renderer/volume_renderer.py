@@ -234,16 +234,16 @@ class Renderer:
         alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
         
         # 调试：检查密度和alpha值
-        if torch.rand(1) < 0.01:  # 1%概率打印
-            density_raw = raw[..., 3]
-            print(f"DEBUG - raw density range: [{density_raw.min():.4f}, {density_raw.max():.4f}]")
-            print(f"DEBUG - alpha range: [{alpha.min():.4f}, {alpha.max():.4f}]")
-            print(f"DEBUG - alpha mean: {alpha.mean():.4f}")
-            
-            # 检查有多少光线有显著的alpha值
-            significant_alpha = (alpha > 0.1).any(dim=-1).sum().item()
-            total_rays = alpha.shape[0]
-            print(f"DEBUG - Rays with significant alpha: {significant_alpha}/{total_rays} ({significant_alpha/total_rays:.2%})")
+        # if torch.rand(1) < 0.01:  # 1%概率打印
+        #     density_raw = raw[..., 3]
+        #     print(f"DEBUG - raw density range: [{density_raw.min():.4f}, {density_raw.max():.4f}]")
+        #     print(f"DEBUG - alpha range: [{alpha.min():.4f}, {alpha.max():.4f}]")
+        #     print(f"DEBUG - alpha mean: {alpha.mean():.4f}")
+        #     
+        #     # 检查有多少光线有显著的alpha值
+        #     significant_alpha = (alpha > 0.1).any(dim=-1).sum().item()
+        #     total_rays = alpha.shape[0]
+        #     print(f"DEBUG - Rays with significant alpha: {significant_alpha}/{total_rays} ({significant_alpha/total_rays:.2%})")
         
         # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, axis=-1, exclusive=True)
         weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=self.device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
@@ -256,19 +256,19 @@ class Renderer:
         # 标准NeRF背景处理：根据配置文件设置添加背景颜色
         if self.white_bkgd:
             # 调试：检查累积透明度的分布
-            if torch.rand(1) < 0.02:  # 2%概率打印调试信息
-                print(f"DEBUG - acc_map stats: min={acc_map.min():.4f}, max={acc_map.max():.4f}, mean={acc_map.mean():.4f}")
-                incomplete_rays = (acc_map < 0.95).sum().item()
-                total_rays = acc_map.numel()
-                print(f"DEBUG - Incomplete rays: {incomplete_rays}/{total_rays} ({incomplete_rays/total_rays:.2%})")
-                bg_contribution = (1. - acc_map).mean()
-                print(f"DEBUG - Average background contribution: {bg_contribution:.4f}")
-                
-                # 检查rgb_map在添加背景前后的变化
-                rgb_before = rgb_map.clone()
-                rgb_after = rgb_map + (1. - acc_map[..., None])
-                print(f"DEBUG - RGB before background: min={rgb_before.min():.4f}, max={rgb_before.max():.4f}, mean={rgb_before.mean():.4f}")
-                print(f"DEBUG - RGB after background: min={rgb_after.min():.4f}, max={rgb_after.max():.4f}, mean={rgb_after.mean():.4f}")
+            # if torch.rand(1) < 0.02:  # 2%概率打印调试信息
+            #     print(f"DEBUG - acc_map stats: min={acc_map.min():.4f}, max={acc_map.max():.4f}, mean={acc_map.mean():.4f}")
+            #     incomplete_rays = (acc_map < 0.95).sum().item()
+            #     total_rays = acc_map.numel()
+            #     print(f"DEBUG - Incomplete rays: {incomplete_rays}/{total_rays} ({incomplete_rays/total_rays:.2%})")
+            #     bg_contribution = (1. - acc_map).mean()
+            #     print(f"DEBUG - Average background contribution: {bg_contribution:.4f}")
+            #     
+            #     # 检查rgb_map在添加背景前后的变化
+            #     rgb_before = rgb_map.clone()
+            #     rgb_after = rgb_map + (1. - acc_map[..., None])
+            #     print(f"DEBUG - RGB before background: min={rgb_before.min():.4f}, max={rgb_before.max():.4f}, mean={rgb_before.mean():.4f}")
+            #     print(f"DEBUG - RGB after background: min={rgb_after.min():.4f}, max={rgb_after.max():.4f}, mean={rgb_after.mean():.4f}")
             
             # 白色背景：添加白色到未完全不透明的区域
             rgb_map = rgb_map + (1. - acc_map[..., None])
@@ -332,14 +332,18 @@ class Renderer:
             
             cam_up = np.cross(cam_right, cam_forward)
             
-            # 构造相机变换矩阵
+            # 构造相机变换矩阵 (OpenGL/NeRF convention)
             pose = np.eye(4)
             pose[:3, 0] = cam_right
             pose[:3, 1] = cam_up
-            pose[:3, 2] = cam_forward
+            pose[:3, 2] = cam_forward  # 注意：NeRF使用+Z朝向，不是-Z
             pose[:3, 3] = cam_pos
             
             render_poses.append(pose)
+        
+        print(f"Generated {len(render_poses)} spiral poses")
+        print(f"Camera positions range: {np.array([p[:3, 3] for p in render_poses]).min(axis=0)} to {np.array([p[:3, 3] for p in render_poses]).max(axis=0)}")
+        print(f"Center: {center}, Radius: {radius}")
             
         return np.array(render_poses)
     
@@ -402,15 +406,22 @@ class Renderer:
                     rgb_np = rgb_map.cpu().numpy()
                     disp_np = disp_map.cpu().numpy()
                     
+                    # 调试：检查渲染结果
+                    if i % 10 == 0:  # 每10帧检查一次
+                        print(f"Frame {i}: RGB range [{rgb_np.min():.4f}, {rgb_np.max():.4f}], mean={rgb_np.mean():.4f}")
+                        print(f"Frame {i}: Disp range [{disp_np.min():.4f}, {disp_np.max():.4f}], mean={disp_np.mean():.4f}")
+                    
                     # 确保在[0,1]范围内
                     rgb_np = np.clip(rgb_np, 0, 1)
-                    disp_np = np.clip(disp_np, 0, np.max(disp_np))
+                    disp_np = np.clip(disp_np, 0, np.max(disp_np) if np.max(disp_np) > 0 else 1.0)
                     
                     rgbs.append(rgb_np)
                     disps.append(disp_np)
                     
                 except Exception as e:
                     print(f"Error rendering frame {i}: {e}")
+                    import traceback
+                    traceback.print_exc()
                     # 创建黑色帧作为备用
                     rgbs.append(np.zeros((H, W, 3), dtype=np.float32))
                     disps.append(np.zeros((H, W), dtype=np.float32))
@@ -444,6 +455,11 @@ class Renderer:
         rgbs, disps = self.render_path(render_poses, hwf, intrinsics)
         
         print(f'Done rendering, saving videos with shape: RGB {rgbs.shape}, Disp {disps.shape}')
+        
+        # 调试：检查渲染结果的统计信息
+        if len(rgbs) > 0:
+            print(f"RGB stats: min={rgbs.min():.4f}, max={rgbs.max():.4f}, mean={rgbs.mean():.4f}")
+            print(f"Disp stats: min={disps.min():.4f}, max={disps.max():.4f}, mean={disps.mean():.4f}")
         
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
@@ -498,3 +514,215 @@ class Renderer:
                 cv2.imwrite(disp_frame_path, to8b(disp_normalized[i]))
             
             print(f'All frames saved to: {frames_dir}')
+    
+    def create_video_from_images(self, image_dir, output_video_path, fps=None, pattern='*.png', sort_key=None):
+        """
+        根据已渲染的图片创建视频
+        
+        Args:
+            image_dir: 包含图片的目录
+            output_video_path: 输出视频文件路径
+            fps: 帧率 (使用cfg.fps如果为None)
+            pattern: 图片文件匹配模式
+            sort_key: 排序键函数 (默认按文件名排序)
+        """
+        import glob
+        
+        if fps is None:
+            fps = cfg.fps
+        
+        # 查找所有图片文件
+        image_pattern = os.path.join(image_dir, pattern)
+        image_files = glob.glob(image_pattern)
+        
+        if not image_files:
+            print(f"No images found in {image_dir} with pattern {pattern}")
+            return
+        
+        # 排序图片文件
+        if sort_key is None:
+            # 默认按文件名排序
+            image_files.sort()
+        else:
+            image_files.sort(key=sort_key)
+        
+        print(f"Found {len(image_files)} images in {image_dir}")
+        print(f"First image: {os.path.basename(image_files[0])}")
+        print(f"Last image: {os.path.basename(image_files[-1])}")
+        
+        # 读取图片并转换为视频格式
+        frames = []
+        
+        for i, img_path in enumerate(tqdm(image_files, desc="Loading images")):
+            try:
+                # 使用cv2读取图片
+                img = cv2.imread(img_path)
+                if img is None:
+                    print(f"Warning: Could not read image {img_path}")
+                    continue
+                
+                # 转换BGR到RGB
+                img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                frames.append(img_rgb)
+                
+                # 每100帧打印一次进度
+                if i % 100 == 0:
+                    print(f"Loaded {i+1}/{len(image_files)} images")
+                    
+            except Exception as e:
+                print(f"Error loading image {img_path}: {e}")
+                continue
+        
+        if not frames:
+            print("No valid images found")
+            return
+        
+        print(f"Loaded {len(frames)} valid images")
+        
+        # 创建输出目录
+        output_dir = os.path.dirname(output_video_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        
+        # 保存视频
+        try:
+            print(f"Creating video: {output_video_path}")
+            print(f"Video settings: {len(frames)} frames, {fps} fps")
+            
+            imageio.mimwrite(
+                output_video_path,
+                frames,
+                fps=fps,
+                quality=8,
+                macro_block_size=16
+            )
+            
+            print(f"Video saved successfully: {output_video_path}")
+            duration = len(frames) / fps
+            print(f"Video duration: {duration:.2f} seconds")
+            
+        except Exception as e:
+            print(f"Error creating video: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def create_video_from_result_images(self, result_dir, output_video_path, image_type='pred', fps=None):
+        """
+        根据评估结果中的图片创建视频
+        
+        Args:
+            result_dir: 结果目录 (通常是 cfg.result_dir)
+            output_video_path: 输出视频路径
+            image_type: 图片类型 ('pred', 'gt', 'both')
+            fps: 帧率
+        """
+        images_dir = os.path.join(result_dir, 'images')
+        
+        if not os.path.exists(images_dir):
+            print(f"Images directory not found: {images_dir}")
+            return
+        
+        if image_type == 'pred':
+            # 使用预测图片
+            pattern = '*_pred.png'
+            self.create_video_from_images(
+                images_dir, 
+                output_video_path, 
+                fps=fps, 
+                pattern=pattern,
+                sort_key=lambda x: int(os.path.basename(x).split('_')[0].replace('view', ''))
+            )
+        elif image_type == 'gt':
+            # 使用真实图片
+            pattern = '*_gt.png'
+            gt_video_path = output_video_path.replace('.mp4', '_gt.mp4')
+            self.create_video_from_images(
+                images_dir, 
+                gt_video_path, 
+                fps=fps, 
+                pattern=pattern,
+                sort_key=lambda x: int(os.path.basename(x).split('_')[0].replace('view', ''))
+            )
+        elif image_type == 'both':
+            # 创建预测和真实图片的对比视频
+            self.create_comparison_video(images_dir, output_video_path, fps=fps)
+    
+    def create_comparison_video(self, images_dir, output_video_path, fps=None):
+        """
+        创建预测和真实图片的对比视频
+        
+        Args:
+            images_dir: 图片目录
+            output_video_path: 输出视频路径
+            fps: 帧率
+        """
+        import glob
+        
+        if fps is None:
+            fps = cfg.fps
+        
+        # 查找预测和真实图片
+        pred_files = glob.glob(os.path.join(images_dir, '*_pred.png'))
+        gt_files = glob.glob(os.path.join(images_dir, '*_gt.png'))
+        
+        if not pred_files or not gt_files:
+            print(f"Not enough images found in {images_dir}")
+            return
+        
+        # 按索引排序
+        pred_files.sort(key=lambda x: int(os.path.basename(x).split('_')[0].replace('view', '')))
+        gt_files.sort(key=lambda x: int(os.path.basename(x).split('_')[0].replace('view', '')))
+        
+        print(f"Creating comparison video with {len(pred_files)} frames")
+        
+        frames = []
+        
+        for pred_file, gt_file in zip(pred_files, gt_files):
+            try:
+                # 读取图片
+                pred_img = cv2.imread(pred_file)
+                gt_img = cv2.imread(gt_file)
+                
+                if pred_img is None or gt_img is None:
+                    continue
+                
+                # 转换BGR到RGB
+                pred_rgb = cv2.cvtColor(pred_img, cv2.COLOR_BGR2RGB)
+                gt_rgb = cv2.cvtColor(gt_img, cv2.COLOR_BGR2RGB)
+                
+                # 水平拼接图片 (左边预测，右边真实)
+                combined = np.hstack([pred_rgb, gt_rgb])
+                frames.append(combined)
+                
+            except Exception as e:
+                print(f"Error processing {pred_file} and {gt_file}: {e}")
+                continue
+        
+        if not frames:
+            print("No valid image pairs found")
+            return
+        
+        # 创建输出目录
+        output_dir = os.path.dirname(output_video_path)
+        if output_dir:
+            os.makedirs(output_dir, exist_ok=True)
+        
+        # 保存对比视频
+        try:
+            comparison_video_path = output_video_path.replace('.mp4', '_comparison.mp4')
+            print(f"Creating comparison video: {comparison_video_path}")
+            
+            imageio.mimwrite(
+                comparison_video_path,
+                frames,
+                fps=fps,
+                quality=8,
+                macro_block_size=16
+            )
+            
+            print(f"Comparison video saved: {comparison_video_path}")
+            
+        except Exception as e:
+            print(f"Error creating comparison video: {e}")
+            import traceback
+            traceback.print_exc()
