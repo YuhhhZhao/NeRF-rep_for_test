@@ -223,6 +223,14 @@ class Renderer:
         acc_map = torch.sum(weights, -1)
 
         if self.white_bkgd:
-            rgb_map = rgb_map + (1. - acc_map[..., None])
+            # 调试：检查累积透明度的分布
+            if torch.rand(1) < 0.01:  # 1%的概率打印调试信息
+                print(f"DEBUG - acc_map stats: min={acc_map.min():.4f}, max={acc_map.max():.4f}, mean={acc_map.mean():.4f}")
+                bg_contribution = (1. - acc_map).mean()
+                print(f"DEBUG - background contribution mean: {bg_contribution:.4f}")
+            
+            # 临时禁用白色背景进行测试
+            # rgb_map = rgb_map + (1. - acc_map[..., None])
+            print("DEBUG - White background disabled for testing")
 
         return rgb_map, disp_map, acc_map, weights, depth_map

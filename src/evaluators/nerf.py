@@ -156,6 +156,11 @@ class Evaluator:
         near_one = (rgb_pred > 0.9).sum() / rgb_pred.size
         print(f"  rgb_pred: {near_zero:.2%} pixels near 0, {near_one:.2%} pixels near 1")
         
+        # 检测过曝问题并提供警告
+        if near_one > 0.5:  # 如果超过50%像素接近白色
+            print(f"  WARNING: Predicted image appears overexposed!")
+            print(f"  This suggests white background or saturation issues in volume rendering.")
+        
         # 确保值在[0, 1]范围内
         rgb_pred = np.clip(rgb_pred, 0, 1)
         img_gt = np.clip(img_gt, 0, 1)
