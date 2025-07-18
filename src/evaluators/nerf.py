@@ -27,8 +27,8 @@ class Evaluator:
         检查并处理图像的数值范围
         """
         # 调试：检查图像的数值范围
-        print(f"DEBUG - img_pred range: [{img_pred.min():.6f}, {img_pred.max():.6f}]")
-        print(f"DEBUG - img_gt range: [{img_gt.min():.6f}, {img_gt.max():.6f}]")
+        # print(f"DEBUG - img_pred range: [{img_pred.min():.6f}, {img_pred.max():.6f}]")
+        # print(f"DEBUG - img_gt range: [{img_gt.min():.6f}, {img_gt.max():.6f}]")
         
         # 检查图像是否在[0,1]范围内
         pred_in_01 = (img_pred.min() >= 0) and (img_pred.max() <= 1)
@@ -48,7 +48,7 @@ class Evaluator:
                 img_gt = img_gt / 255.0
         
         mse = np.mean((img_pred - img_gt) ** 2)
-        print(f"DEBUG - MSE: {mse:.8f}")
+        # print(f"DEBUG - MSE: {mse:.8f}")
         
         if mse == 0:
             return float('inf')  # 如果MSE为0，PSNR为无穷大
@@ -58,7 +58,7 @@ class Evaluator:
         psnr = 20 * np.log10(max_pixel_value) - 10 * np.log10(mse)
         # 由于max_pixel_value=1，所以简化为: psnr = -10 * np.log10(mse)
         
-        print(f"DEBUG - PSNR: {psnr:.2f} dB")
+        # print(f"DEBUG - PSNR: {psnr:.2f} dB")
         
         return psnr
 
