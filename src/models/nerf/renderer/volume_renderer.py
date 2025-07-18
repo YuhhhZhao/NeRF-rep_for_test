@@ -230,11 +230,16 @@ class Renderer:
         alpha = raw2alpha(raw[..., 3] + noise, dists)  # [N_rays, N_samples]
         
         # 调试：检查密度和alpha值
-        # if torch.rand(1) < 0.01:  # 1%概率打印
-        #     density_raw = raw[..., 3]
-        #     print(f"DEBUG - raw density range: [{density_raw.min():.4f}, {density_raw.max():.4f}]")
-        #     print(f"DEBUG - alpha range: [{alpha.min():.4f}, {alpha.max():.4f}]")
-        #     print(f"DEBUG - alpha mean: {alpha.mean():.4f}")
+        if torch.rand(1) < 0.01:  # 1%概率打印
+            density_raw = raw[..., 3]
+            print(f"DEBUG - raw density range: [{density_raw.min():.4f}, {density_raw.max():.4f}]")
+            print(f"DEBUG - alpha range: [{alpha.min():.4f}, {alpha.max():.4f}]")
+            print(f"DEBUG - alpha mean: {alpha.mean():.4f}")
+            
+            # 检查有多少光线有显著的alpha值
+            significant_alpha = (alpha > 0.1).any(dim=-1).sum().item()
+            total_rays = alpha.shape[0]
+            print(f"DEBUG - Rays with significant alpha: {significant_alpha}/{total_rays} ({significant_alpha/total_rays:.2%})")
         
         # weights = alpha * tf.math.cumprod(1.-alpha + 1e-10, axis=-1, exclusive=True)
         weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=self.device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
@@ -246,6 +251,21 @@ class Renderer:
 
         # 标准NeRF背景处理：根据配置文件设置添加背景颜色
         if self.white_bkgd:
+            # 调试：检查累积透明度的分布
+            if torch.rand(1) < 0.02:  # 2%概率打印调试信息
+                print(f"DEBUG - acc_map stats: min={acc_map.min():.4f}, max={acc_map.max():.4f}, mean={acc_map.mean():.4f}")
+                incomplete_rays = (acc_map < 0.95).sum().item()
+                total_rays = acc_map.numel()
+                print(f"DEBUG - Incomplete rays: {incomplete_rays}/{total_rays} ({incomplete_rays/total_rays:.2%})")
+                bg_contribution = (1. - acc_map).mean()
+                print(f"DEBUG - Average background contribution: {bg_contribution:.4f}")
+                
+                # 检查rgb_map在添加背景前后的变化
+                rgb_before = rgb_map.clone()
+                rgb_after = rgb_map + (1. - acc_map[..., None])
+                print(f"DEBUG - RGB before background: min={rgb_before.min():.4f}, max={rgb_before.max():.4f}, mean={rgb_before.mean():.4f}")
+                print(f"DEBUG - RGB after background: min={rgb_after.min():.4f}, max={rgb_after.max():.4f}, mean={rgb_after.mean():.4f}")
+            
             # 白色背景：添加白色到未完全不透明的区域
             rgb_map = rgb_map + (1. - acc_map[..., None])
         # 如果不使用白色背景，保持原始体积渲染结果（黑色背景）
