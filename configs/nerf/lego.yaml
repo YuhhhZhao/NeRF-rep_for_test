@@ -90,4 +90,4 @@ render_num: 120 # number of frames to render
 render_type: "spiral" # camera path type: "spiral" or "original"
 
 # background processing settings
-background_strategy: "conservative" # "conservative", "smart", or "none"
+background_strategy: "none" # "conservative", "smart", or "none"
