@@ -106,9 +106,9 @@ class Evaluator:
         
         return ssim_value
 
-    def smart_background_conversion(self, img_gt, rgb_pred):
+    def conservative_background_conversion(self, img_gt, rgb_pred):
         """
-        智能背景转换：精确区分物体的黑色部分和背景
+        保守的背景转换：只转换边缘的大片纯黑区域
         
         Args:
             img_gt: 真实图像 [H, W, 3]
@@ -127,92 +127,194 @@ class Evaluator:
         gray_gt = np.mean(img_gt, axis=2)
         gray_pred = np.mean(rgb_pred, axis=2)
         
-        # 2. 多层次阈值分析
-        # 非常暗的区域（可能是背景或物体的阴影）
-        very_dark = gray_gt < 0.02
-        # 较暗的区域（可能是物体的黑色部分）
-        dark = (gray_gt >= 0.02) & (gray_gt < 0.15)
-        # 中等亮度区域
-        medium = (gray_gt >= 0.15) & (gray_gt < 0.5)
-        # 亮区域
-        bright = gray_gt >= 0.5
+        # 2. 只考虑图像边缘区域
+        edge_width = min(30, H//8, W//8)  # 边缘宽度
+        edge_mask = np.zeros((H, W), dtype=bool)
+        edge_mask[:edge_width, :] = True     # 上边缘
+        edge_mask[-edge_width:, :] = True    # 下边缘
+        edge_mask[:, :edge_width] = True     # 左边缘
+        edge_mask[:, -edge_width:] = True    # 右边缘
         
-        # 3. 基于预测图像的前景检测
-        # 预测图像中的前景区域（非纯白）
-        pred_foreground = gray_pred < 0.9
+        # 3. 在边缘区域中寻找背景
+        # 条件：非常暗 + 预测图像为白色
+        very_dark_gt = gray_gt < 0.005  # 非常严格的暗区域阈值
+        white_pred = gray_pred > 0.98   # 预测图像中的纯白区域
         
-        # 4. 颜色信息分析
-        # 计算每个像素的颜色饱和度
+        # 候选背景区域
+        candidate_bg = edge_mask & very_dark_gt & white_pred
+        
+        # 4. 连通域分析：只保留大的连通区域
+        labeled, num_features = ndimage.label(candidate_bg)
+        final_bg_mask = np.zeros_like(candidate_bg)
+        
+        if num_features > 0:
+            sizes = ndimage.sum(candidate_bg, labeled, range(1, num_features + 1))
+            
+            # 只保留面积大于总面积2%的连通域
+            min_size = H * W * 0.02
+            
+            for i, size in enumerate(sizes, 1):
+                if size > min_size:
+                    final_bg_mask[labeled == i] = True
+        
+        # 5. 形态学操作：平滑边界
+        if final_bg_mask.sum() > 0:
+            kernel = np.ones((3, 3), np.uint8)
+            final_bg_mask = cv2.morphologyEx(
+                final_bg_mask.astype(np.uint8), 
+                cv2.MORPH_CLOSE, 
+                kernel
+            ).astype(bool)
+        
+        # 6. 应用背景转换
+        img_gt_converted[final_bg_mask] = 1.0
+        
+        return img_gt_converted
+
+    def smart_background_conversion(self, img_gt, rgb_pred):
+        """
+        智能背景转换：更保守的背景检测，避免误伤物体黑色部分
+        
+        Args:
+            img_gt: 真实图像 [H, W, 3]
+            rgb_pred: 预测图像 [H, W, 3] (用于参考)
+            
+        Returns:
+            转换后的GT图像
+        """
+        import cv2
+        from scipy import ndimage
+        
+        H, W = img_gt.shape[:2]
+        img_gt_converted = img_gt.copy()
+        
+        # 1. 转换到灰度图
+        gray_gt = np.mean(img_gt, axis=2)
+        gray_pred = np.mean(rgb_pred, axis=2)
+        
+        # 2. 更严格的背景检测
+        # 只将非常暗且无纹理的区域视为背景
+        very_dark = gray_gt < 0.01  # 更严格的阈值
+        
+        # 3. 预测图像中的纯白背景区域
+        pred_white_bg = gray_pred > 0.95  # 预测图像中的纯白区域
+        
+        # 4. 边缘检测 - 检测物体边界
+        edges = cv2.Canny((gray_gt * 255).astype(np.uint8), 3, 10)
+        edges_dilated = cv2.dilate(edges, np.ones((7, 7), np.uint8), iterations=1)
+        near_edges = edges_dilated > 0
+        
+        # 5. 颜色方差分析 - 检测有纹理的区域
+        # 计算每个像素邻域的方差
+        kernel_size = 5
+        gray_float = gray_gt.astype(np.float32)
+        
+        # 使用均值滤波器计算局部均值
+        local_mean = cv2.blur(gray_float, (kernel_size, kernel_size))
+        # 计算局部方差
+        local_var = cv2.blur((gray_float - local_mean) ** 2, (kernel_size, kernel_size))
+        
+        # 有纹理的区域（方差大于阈值）
+        textured_regions = local_var > 0.001
+        
+        # 6. 颜色饱和度分析
         max_rgb = np.max(img_gt, axis=2)
         min_rgb = np.min(img_gt, axis=2)
         saturation = (max_rgb - min_rgb) / (max_rgb + 1e-6)
+        colored_regions = saturation > 0.02  # 有颜色的区域
         
-        # 有颜色的区域（饱和度>0.05）很可能是物体
-        colored_regions = saturation > 0.05
-        
-        # 5. 边缘检测（物体边界）
-        edges = cv2.Canny((gray_gt * 255).astype(np.uint8), 5, 20)
-        edges_dilated = cv2.dilate(edges, np.ones((5, 5), np.uint8), iterations=1)
-        near_edges = edges_dilated > 0
-        
-        # 6. 构建前景掩码
-        # 初始前景掩码：结合多种线索
+        # 7. 构建更保守的前景掩码
+        # 前景 = 有纹理 OR 有颜色 OR 靠近边缘 OR 不是很暗
         foreground_mask = (
-            colored_regions |           # 有颜色的区域
-            (dark & pred_foreground) |  # 预测图像中对应的暗区域
-            (medium | bright) |         # 中等亮度以上的区域
-            near_edges                  # 边缘附近的区域
+            textured_regions |      # 有纹理的区域
+            colored_regions |       # 有颜色的区域
+            near_edges |           # 边缘附近的区域
+            (gray_gt > 0.05)       # 不是很暗的区域
         )
         
-        # 7. 处理very_dark区域
-        # 对于非常暗的区域，需要更加谨慎
-        for very_dark_region in [very_dark]:
-            if very_dark_region.sum() > 0:
-                # 检查这些区域是否在预测图像中有对应的前景
-                very_dark_pred_support = very_dark & pred_foreground
-                
-                # 如果预测图像中有对应的前景，保留这些区域
-                if very_dark_pred_support.sum() > very_dark.sum() * 0.3:
-                    foreground_mask = foreground_mask | very_dark_pred_support
+        # 8. 基于预测图像的一致性检查
+        # 如果预测图像在某个区域不是纯白，那么GT中对应区域很可能是前景
+        pred_non_white = gray_pred < 0.9
+        foreground_mask = foreground_mask | pred_non_white
         
-        # 8. 连通域分析：保留合理大小的连通区域
-        labeled, num_features = ndimage.label(foreground_mask)
+        # 9. 连通域分析 - 只保留大的连通区域
+        labeled, num_features = ndimage.label(~foreground_mask)  # 分析背景连通域
         if num_features > 0:
-            # 计算每个连通域的大小
-            sizes = ndimage.sum(foreground_mask, labeled, range(1, num_features + 1))
-            # 保留面积大于总面积0.5%的连通域
-            min_size = H * W * 0.005
-            large_regions = sizes > min_size
+            sizes = ndimage.sum(~foreground_mask, labeled, range(1, num_features + 1))
             
-            # 创建新的掩码，只保留大的连通域
-            refined_mask = np.zeros_like(foreground_mask)
-            for i, keep in enumerate(large_regions, 1):
+            # 只保留面积大于总面积5%的背景连通域
+            min_bg_size = H * W * 0.05
+            large_bg_regions = sizes > min_bg_size
+            
+            # 创建新的背景掩码，只保留大的背景连通域
+            refined_bg_mask = np.zeros_like(foreground_mask)
+            for i, keep in enumerate(large_bg_regions, 1):
                 if keep:
-                    refined_mask[labeled == i] = 1
+                    refined_bg_mask[labeled == i] = 1
             
-            # 如果refined_mask不为空，使用它
-            if refined_mask.sum() > 0:
-                foreground_mask = refined_mask.astype(bool)
+            # 更新前景掩码
+            foreground_mask = ~refined_bg_mask.astype(bool)
         
-        # 9. 形态学操作优化掩码
-        # 闭运算：填充物体内部的小洞
-        kernel = np.ones((3, 3), np.uint8)
-        foreground_mask = cv2.morphologyEx(foreground_mask.astype(np.uint8), cv2.MORPH_CLOSE, kernel)
+        # 10. 边界保护 - 图像边缘很可能是背景
+        border_width = min(10, H//20, W//20)  # 边界宽度
+        border_mask = np.zeros((H, W), dtype=bool)
+        border_mask[:border_width, :] = True     # 上边界
+        border_mask[-border_width:, :] = True    # 下边界
+        border_mask[:, :border_width] = True     # 左边界
+        border_mask[:, -border_width:] = True    # 右边界
         
-        # 开运算：去除小的噪点
-        kernel_small = np.ones((2, 2), np.uint8)
-        foreground_mask = cv2.morphologyEx(foreground_mask, cv2.MORPH_OPEN, kernel_small)
+        # 边界区域如果很暗且预测图像是白色，则认为是背景
+        border_background = border_mask & very_dark & pred_white_bg
         
-        foreground_mask = foreground_mask.astype(bool)
+        # 11. 最终背景掩码
+        final_background_mask = border_background
         
-        # 10. 应用掩码：只将背景区域设为白色
-        background_mask = ~foreground_mask
-        img_gt_converted[background_mask] = 1.0
+        # 12. 形态学操作优化
+        if final_background_mask.sum() > 0:
+            kernel = np.ones((3, 3), np.uint8)
+            final_background_mask = cv2.morphologyEx(
+                final_background_mask.astype(np.uint8), 
+                cv2.MORPH_CLOSE, 
+                kernel
+            ).astype(bool)
         
-        # 11. 调试信息
-        foreground_ratio = foreground_mask.sum() / (H * W)
-        very_dark_ratio = very_dark.sum() / (H * W)
-        dark_ratio = dark.sum() / (H * W)
+        # 13. 应用背景转换
+        img_gt_converted[final_background_mask] = 1.0
+        
+        # 14. 统计信息
+        conversion_ratio = final_background_mask.sum() / (H * W)
+        
+        # 如果转换比例过高（>30%），可能有问题，进一步限制
+        if conversion_ratio > 0.3:
+            # 进一步限制，只转换图像边缘的大片纯黑区域
+            edge_only_mask = np.zeros_like(final_background_mask)
+            
+            # 只在图像边缘区域寻找背景
+            edge_width = min(20, H//10, W//10)
+            edge_region = np.zeros((H, W), dtype=bool)
+            edge_region[:edge_width, :] = True
+            edge_region[-edge_width:, :] = True
+            edge_region[:, :edge_width] = True
+            edge_region[:, -edge_width:] = True
+            
+            # 在边缘区域中，只转换很暗且预测为白色的区域
+            edge_background = edge_region & (gray_gt < 0.005) & (gray_pred > 0.95)
+            
+            # 连通域分析
+            labeled, num_features = ndimage.label(edge_background)
+            if num_features > 0:
+                sizes = ndimage.sum(edge_background, labeled, range(1, num_features + 1))
+                min_size = H * W * 0.01  # 至少1%的面积
+                
+                for i, size in enumerate(sizes, 1):
+                    if size > min_size:
+                        edge_only_mask[labeled == i] = True
+            
+            # 如果新的掩码更合理，使用它
+            if edge_only_mask.sum() > 0 and edge_only_mask.sum() < final_background_mask.sum():
+                final_background_mask = edge_only_mask
+                img_gt_converted = img_gt.copy()
+                img_gt_converted[final_background_mask] = 1.0
         
         return img_gt_converted
 
@@ -284,14 +386,29 @@ class Evaluator:
         # 检查是否需要背景转换
         need_bg_conversion = pred_bg_white and gt_bg_black
         
+        # 获取背景处理策略
+        bg_strategy = getattr(cfg, 'background_strategy', 'conservative')  # 默认保守策略
+        
         if need_bg_conversion:
             # 使用智能背景检测方法
             img_gt_original = img_gt.copy()
-            img_gt = self.smart_background_conversion(img_gt, rgb_pred)
+            
+            if bg_strategy == 'conservative':
+                # 保守策略：只转换边缘的大片纯黑区域
+                img_gt = self.conservative_background_conversion(img_gt, rgb_pred)
+            elif bg_strategy == 'smart':
+                # 智能策略：使用复杂的特征检测
+                img_gt = self.smart_background_conversion(img_gt, rgb_pred)
+            elif bg_strategy == 'none':
+                # 不进行背景转换
+                pass
+            else:
+                # 默认使用保守策略
+                img_gt = self.conservative_background_conversion(img_gt, rgb_pred)
             
             # 检查转换效果
             conversion_ratio = (img_gt != img_gt_original).sum() / img_gt.size
-            print(f"  Applied smart background conversion (changed {conversion_ratio:.1%} of pixels)")
+            print(f"  Applied {bg_strategy} background conversion (changed {conversion_ratio:.1%} of pixels)")
         else:
             # 如果不需要背景转换，可能只需要轻微调整
             if pred_bg_white and not gt_bg_black:
