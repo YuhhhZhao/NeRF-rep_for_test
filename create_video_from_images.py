@@ -16,10 +16,7 @@ import imageio
 import numpy as np
 from tqdm import tqdm
 
-# Add src to path
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), 'src'))
-
-from src.config import cfg
+# 不导入 src.config 以避免参数冲突
 
 
 def create_video_from_images(image_dir, output_video_path, fps=24, pattern='*.png', sort_key=None):
