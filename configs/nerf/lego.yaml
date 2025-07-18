@@ -87,3 +87,4 @@ write_video: True # enable video rendering
 render_path: True # render camera path
 fps: 24 # video fps
 render_num: 120 # number of frames to render
+render_type: "spiral" # camera path type: "spiral" or "original"

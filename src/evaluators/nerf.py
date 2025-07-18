@@ -327,16 +327,20 @@ class Evaluator:
         output_dir = os.path.join(cfg.result_dir, "videos")
         exp_name = cfg.exp_name
         
-        # 渲染视频
-        renderer.render_video(
+        # 渲染新视角序列并生成视频
+        render_type = getattr(cfg, 'render_type', 'spiral')  # 默认使用螺旋视角
+        images_dir, video_path = renderer.render_novel_view_sequence(
             poses=poses,
             hwf=hwf,
             output_dir=output_dir,
             exp_name=exp_name,
             iteration=iteration,
             intrinsics=intrinsics,
-            render_type='spiral'
+            render_type=render_type
         )
+        
+        print(f"Novel view sequence rendered ({render_type}): {images_dir}")
+        print(f"Video saved: {video_path}")
         
         # 另外，如果存在评估结果图片，也创建对比视频
         try:

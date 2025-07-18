@@ -428,21 +428,21 @@ class Renderer:
         
         return np.array(rgbs), np.array(disps)
     
-    def render_video(self, poses, hwf, output_dir, exp_name, iteration=0, 
-                    intrinsics=None, render_type='spiral'):
+    def render_novel_view_sequence(self, poses, hwf, output_dir, exp_name, iteration=0, 
+                                  intrinsics=None, render_type='spiral'):
         """
-        Render and save video using NeRF-style approach
+        渲染新视角序列并保存为图片
         
         Args:
             poses: [N, 4, 4] camera poses from dataset
             hwf: [H, W, focal] image dimensions and focal length
-            output_dir: output directory for videos
+            output_dir: output directory for images
             exp_name: experiment name for file naming
             iteration: current iteration number
             intrinsics: camera intrinsics (optional)
-            render_type: 'spiral' or 'path'
+            render_type: 'spiral' or 'original' (default: 'spiral')
         """
-        print(f"Rendering video - Type: {render_type}")
+        print(f"Rendering novel view sequence - Type: {render_type}")
         
         # 生成渲染路径
         if render_type == 'spiral':
@@ -451,69 +451,89 @@ class Renderer:
             # 使用原始poses
             render_poses = poses.cpu().numpy() if torch.is_tensor(poses) else poses
         
-        # 渲染路径
-        rgbs, disps = self.render_path(render_poses, hwf, intrinsics)
-        
-        print(f'Done rendering, saving videos with shape: RGB {rgbs.shape}, Disp {disps.shape}')
-        
-        # 调试：检查渲染结果的统计信息
-        if len(rgbs) > 0:
-            print(f"RGB stats: min={rgbs.min():.4f}, max={rgbs.max():.4f}, mean={rgbs.mean():.4f}")
-            print(f"Disp stats: min={disps.min():.4f}, max={disps.max():.4f}, mean={disps.mean():.4f}")
-        
         # 创建输出目录
-        os.makedirs(output_dir, exist_ok=True)
+        images_dir = os.path.join(output_dir, 'novel_views')
+        os.makedirs(images_dir, exist_ok=True)
         
-        # 文件名模板（参考NeRF代码）
-        moviebase = os.path.join(output_dir, f'{exp_name}_spiral_{iteration:06d}_')
+        # 渲染并保存图片
+        print(f"Rendering {len(render_poses)} novel views...")
         
-        # 转换为8位格式的辅助函数
-        def to8b(x):
-            return (255 * np.clip(x, 0, 1)).astype(np.uint8)
-        
-        try:
-            # 保存RGB视频
-            rgb_video_path = moviebase + 'rgb.mp4'
-            imageio.mimwrite(rgb_video_path, to8b(rgbs), fps=cfg.fps, quality=8)
-            print(f'RGB video saved: {rgb_video_path}')
-            
-            # 保存深度视频
-            disp_video_path = moviebase + 'disp.mp4'
-            disp_normalized = disps / np.max(disps) if np.max(disps) > 0 else disps
-            imageio.mimwrite(disp_video_path, to8b(disp_normalized), fps=cfg.fps, quality=8)
-            print(f'Disparity video saved: {disp_video_path}')
-            
-            # 保存一些关键帧图像用于调试
-            frame_dir = os.path.join(output_dir, 'frames')
-            os.makedirs(frame_dir, exist_ok=True)
-            
-            # 保存第一帧、中间帧和最后一帧
-            key_frames = [0, len(rgbs)//2, len(rgbs)-1]
-            for i in key_frames:
-                rgb_frame_path = os.path.join(frame_dir, f'frame_{i:04d}_rgb.png')
-                disp_frame_path = os.path.join(frame_dir, f'frame_{i:04d}_disp.png')
+        with torch.no_grad():
+            for i, pose in enumerate(tqdm(render_poses, desc="Rendering novel views")):
+                # 转换为tensor
+                pose_tensor = torch.from_numpy(pose).float().to(self.device)
                 
-                cv2.imwrite(rgb_frame_path, to8b(rgbs[i])[..., [2, 1, 0]])  # BGR for OpenCV
-                cv2.imwrite(disp_frame_path, to8b(disp_normalized[i]))
-            
-            print(f'Key frames saved to: {frame_dir}')
-            
-        except Exception as e:
-            print(f'Error saving videos: {e}')
-            print('Falling back to saving individual frames...')
-            
-            # 备用方案：保存所有帧
-            frames_dir = os.path.join(output_dir, 'all_frames')
-            os.makedirs(frames_dir, exist_ok=True)
-            
-            for i in range(len(rgbs)):
-                rgb_frame_path = os.path.join(frames_dir, f'rgb_{i:04d}.png')
-                disp_frame_path = os.path.join(frames_dir, f'disp_{i:04d}.png')
+                if intrinsics is None:
+                    H, W, focal = hwf
+                    intrinsics_tensor = torch.tensor([
+                        [focal, 0, W / 2],
+                        [0, focal, H / 2],
+                        [0, 0, 1]
+                    ], dtype=torch.float32, device=self.device)
+                else:
+                    intrinsics_tensor = intrinsics.to(self.device)
                 
-                cv2.imwrite(rgb_frame_path, to8b(rgbs[i])[..., [2, 1, 0]])
-                cv2.imwrite(disp_frame_path, to8b(disp_normalized[i]))
-            
-            print(f'All frames saved to: {frames_dir}')
+                # 构造batch
+                batch = {
+                    'pose': pose_tensor.unsqueeze(0),
+                    'intrinsics': intrinsics_tensor.unsqueeze(0),
+                    'H': hwf[0],
+                    'W': hwf[1],
+                }
+                
+                # 渲染
+                try:
+                    ret = self.render(batch)
+                    
+                    # 获取渲染结果
+                    if 'rgb_map' in ret:
+                        rgb_map = ret['rgb_map']
+                        disp_map = ret['disp_map']
+                    else:
+                        rgb_map = ret['rgb_map_0']
+                        disp_map = ret['disp_map_0']
+                    
+                    # 转换为numpy并确保在[0,1]范围内
+                    rgb_np = rgb_map.cpu().numpy()
+                    disp_np = disp_map.cpu().numpy()
+                    
+                    rgb_np = np.clip(rgb_np, 0, 1)
+                    disp_np = np.clip(disp_np, 0, np.max(disp_np) if np.max(disp_np) > 0 else 1.0)
+                    
+                    # 转换为8位格式
+                    rgb_8bit = (255 * rgb_np).astype(np.uint8)
+                    disp_8bit = (255 * disp_np / np.max(disp_np) if np.max(disp_np) > 0 else disp_np).astype(np.uint8)
+                    
+                    # 保存图片
+                    rgb_path = os.path.join(images_dir, f'view{i:04d}_rgb.png')
+                    disp_path = os.path.join(images_dir, f'view{i:04d}_disp.png')
+                    
+                    cv2.imwrite(rgb_path, rgb_8bit[..., [2, 1, 0]])  # BGR for OpenCV
+                    cv2.imwrite(disp_path, disp_8bit)
+                    
+                    # 每10帧显示进度
+                    if i % 10 == 0:
+                        print(f"Rendered {i+1}/{len(render_poses)} views")
+                        print(f"  RGB range: [{rgb_np.min():.4f}, {rgb_np.max():.4f}]")
+                        print(f"  Saved: {rgb_path}")
+                        
+                except Exception as e:
+                    print(f"Error rendering frame {i}: {e}")
+                    import traceback
+                    traceback.print_exc()
+        
+        print(f"Novel view sequence saved to: {images_dir}")
+        
+        # 自动生成视频
+        video_path = os.path.join(output_dir, f'{exp_name}_{render_type}_{iteration:06d}.mp4')
+        self.create_video_from_images(
+            images_dir, 
+            video_path, 
+            pattern='*_rgb.png',
+            sort_key=lambda x: int(os.path.basename(x).split('_')[0].replace('view', ''))
+        )
+        
+        return images_dir, video_path
     
     def create_video_from_images(self, image_dir, output_video_path, fps=None, pattern='*.png', sort_key=None):
         """
