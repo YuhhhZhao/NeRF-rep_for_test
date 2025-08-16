@@ -56,8 +56,13 @@ def quick_test():
         # 尝试创建网络（不加载权重）
         print("Creating network...")
         network = make_network(cfg)
+        
+        # 确保网络在正确的设备上
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        network = network.to(device)
         network.eval()
         print(f"Network created with {sum(p.numel() for p in network.parameters())} parameters")
+        print(f"Network moved to device: {device}")
         
         # 测试渲染器初始化
         print("Testing renderer initialization...")
@@ -177,7 +182,12 @@ def performance_comparison():
             
             # 创建网络和渲染器
             network = make_network(cfg)
+            
+            # 确保网络在正确的设备上
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            network = network.to(device)
             network.eval()
+            
             renderer = Renderer(network)
             
             # 创建测试数据
