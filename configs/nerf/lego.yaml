@@ -91,3 +91,9 @@ render_type: "spiral" # camera path type: "spiral" or "original"
 
 # background processing settings
 background_strategy: "none" # "conservative", "smart", or "none"
+
+# ESS (Empty Space Skipping) and ERT (Early Ray Termination) optimization
+enable_ess: True # enable empty space skipping
+enable_ert: True # enable early ray termination
+ert_threshold: 0.01 # early termination threshold for transmittance
+occupancy_grid_resolution: 128 # resolution of occupancy grid for ESS
