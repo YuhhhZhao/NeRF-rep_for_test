@@ -130,6 +130,14 @@ cfg.skip_eval = False
 
 cfg.fix_random = False
 
+# ESS (Empty Space Skipping) and ERT (Early Ray Termination) optimization
+cfg.enable_ess = True  # enable empty space skipping
+cfg.enable_ert = True  # enable early ray termination
+cfg.ert_threshold = 0.01  # early termination threshold for transmittance
+cfg.occupancy_grid_resolution = 128  # resolution of occupancy grid for ESS
+cfg.background_strategy = "none"  # background processing strategy
+cfg.render_type = "spiral"  # render type for novel views
+
 
 def parse_cfg(cfg, args):
     if len(cfg.task) == 0:

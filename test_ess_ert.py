@@ -10,13 +10,14 @@ import time
 import torch
 import yaml
 import numpy as np
+import argparse
 from pathlib import Path
 
 # 添加项目根目录到Python路径
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
 
-from src.config import cfg, make_cfg
+from src.config.config import cfg, make_cfg
 from src.datasets import make_data_loader
 from src.models import make_network
 from src.models.nerf.renderer.volume_renderer import Renderer
@@ -32,8 +33,18 @@ class ESSERTTester:
         """加载训练好的模型和测试数据"""
         print("Loading model and data...")
         
+        # 创建模拟的命令行参数
+        args = argparse.Namespace()
+        args.cfg_file = self.config_path
+        args.test = True
+        args.type = ""
+        args.det = ""
+        args.local_rank = 0
+        args.opts = []
+        
         # 加载配置
-        make_cfg(self.config_path)
+        global cfg
+        cfg = make_cfg(args)
         
         # 加载模型
         self.network = make_network(cfg)
