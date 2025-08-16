@@ -83,15 +83,19 @@ def quick_test():
         print("Creating test batch...")
         H, W = 100, 100  # 小尺寸用于快速测试
         
-        # 创建简单的相机pose和内参
-        pose = torch.eye(4, dtype=torch.float32)
+        # 获取设备
+        device = renderer.device
+        print(f"Using device: {device}")
+        
+        # 创建简单的相机pose和内参，确保在正确的设备上
+        pose = torch.eye(4, dtype=torch.float32, device=device)
         pose[2, 3] = 4.0  # 相机距离场景中心4个单位
         
         intrinsics = torch.tensor([
             [100.0, 0.0, W/2],
             [0.0, 100.0, H/2],
             [0.0, 0.0, 1.0]
-        ], dtype=torch.float32)
+        ], dtype=torch.float32, device=device)
         
         batch = {
             'pose': pose.unsqueeze(0),
@@ -178,14 +182,18 @@ def performance_comparison():
             
             # 创建测试数据
             H, W = 50, 50  # 更小的尺寸以便快速测试
-            pose = torch.eye(4, dtype=torch.float32)
+            
+            # 获取设备
+            device = renderer.device
+            
+            pose = torch.eye(4, dtype=torch.float32, device=device)
             pose[2, 3] = 4.0
             
             intrinsics = torch.tensor([
                 [50.0, 0.0, W/2],
                 [0.0, 50.0, H/2], 
                 [0.0, 0.0, 1.0]
-            ], dtype=torch.float32)
+            ], dtype=torch.float32, device=device)
             
             batch = {
                 'pose': pose.unsqueeze(0),
