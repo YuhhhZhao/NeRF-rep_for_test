@@ -776,31 +776,137 @@ class Renderer:
             traceback.print_exc()
     
     def _initialize_occupancy_grid(self):
-        """初始化占用网格用于ESS"""
+        """初始化占用网格用于ESS - 优化版本"""
         if not self.enable_ess:
             return
             
         print("Initializing occupancy grid for ESS...")
         
-        # 创建3D占用网格 - 初始化为False（全空）
+        # 创建3D占用网格 - 初始化策略优化
         res = self.occupancy_grid_resolution
         self.occupancy_grid = torch.zeros((res, res, res), device=self.device, dtype=torch.bool)
         
-        # 定义场景边界框（基于near和far）
-        self.scene_bbox_min = torch.tensor([-1.5, -1.5, -1.5], device=self.device)
-        self.scene_bbox_max = torch.tensor([1.5, 1.5, 1.5], device=self.device)
+        # 定义场景边界框（基于near和far，更合理的范围）
+        self.scene_bbox_min = torch.tensor([-2.0, -2.0, -2.0], device=self.device)
+        self.scene_bbox_max = torch.tensor([2.0, 2.0, 2.0], device=self.device)
         
-        # 初始填充一些基础占用区域（可选，可以在训练过程中逐步学习）
-        # 这里我们先设为一个相对保守的初始状态
-        center_size = res // 4
-        center_start = (res - center_size) // 2
-        center_end = center_start + center_size
-        self.occupancy_grid[center_start:center_end, center_start:center_end, center_start:center_end] = True
+        # 更智能的初始化：创建一个球形的初始占用区域
+        # 这对于像Lego这样的中心化场景更合适
+        grid_coords = torch.stack(torch.meshgrid([
+            torch.arange(res, device=self.device),
+            torch.arange(res, device=self.device), 
+            torch.arange(res, device=self.device)
+        ], indexing='ij'), -1).float()
+        
+        # 转换到标准化坐标 [-1, 1]
+        grid_coords = (grid_coords / (res - 1)) * 2.0 - 1.0
+        
+        # 创建球形占用区域（半径0.8，覆盖大部分有效区域）
+        distances = torch.norm(grid_coords, dim=-1)
+        sphere_mask = distances <= 1.2  # 更大的初始区域
+        
+        # 同时添加一些随机噪声以避免过度规整
+        random_mask = torch.rand((res, res, res), device=self.device) < 0.1  # 10%随机占用
+        
+        # 结合球形区域和随机区域
+        self.occupancy_grid = sphere_mask | random_mask
         
         print(f"Occupancy grid initialized: {res}^3 = {res**3} voxels")
         print(f"Scene bbox: {self.scene_bbox_min} to {self.scene_bbox_max}")
         initial_occupancy = self.occupancy_grid.sum().item() / self.occupancy_grid.numel()
         print(f"Initial occupancy rate: {initial_occupancy:.4f} ({initial_occupancy*100:.2f}%)")
+        
+        # 设置自适应参数
+        self.ess_skip_threshold = 0.5  # 降低跳过阈值，更激进地使用ESS
+        self.grid_update_interval = 500  # 降低更新频率
+    
+    def _populate_occupancy_grid_kilonerf_method(self):
+        """
+        KiloNeRF方法：对每个网格单元，在3x3x3子网格上采样密度
+        如果任何密度超过阈值τ则标记为占用
+        """
+        if not self.enable_ess or self.coarse_model is None:
+            return
+            
+        print("Populating occupancy grid using KiloNeRF 3x3x3 subgrid sampling...")
+        
+        res = self.occupancy_grid_resolution
+        density_threshold = 0.01  # 阈值τ，论文中说无需数据集特定调整
+        
+        # 计算网格单元大小
+        bbox_size = self.scene_bbox_max - self.scene_bbox_min
+        cell_size = bbox_size / res
+        
+        # 重置占用网格
+        self.occupancy_grid.fill_(False)
+        
+        with torch.no_grad():
+            # 分批处理以避免内存问题
+            batch_size = 512  # 每次处理的网格单元数
+            
+            for batch_start in range(0, res**3, batch_size):
+                batch_end = min(batch_start + batch_size, res**3)
+                
+                # 计算当前批次的网格索引
+                batch_indices = []
+                batch_points = []
+                
+                for flat_idx in range(batch_start, batch_end):
+                    # 将平坦索引转换为3D索引
+                    z = flat_idx // (res * res)
+                    y = (flat_idx % (res * res)) // res
+                    x = flat_idx % res
+                    
+                    # 计算网格单元的边界
+                    cell_min = self.scene_bbox_min + torch.tensor([x, y, z], device=self.device) * cell_size
+                    
+                    # 在单元格内生成3x3x3采样点
+                    for dz in range(3):
+                        for dy in range(3):
+                            for dx in range(3):
+                                # 子网格内的相对位置 [0, 0.5, 1]
+                                offset = torch.tensor([dx, dy, dz], device=self.device, dtype=torch.float32) / 2.0
+                                point = cell_min + offset * cell_size
+                                batch_points.append(point)
+                                batch_indices.append((x, y, z))
+                
+                if not batch_points:
+                    continue
+                
+                # 批量查询网络
+                pts_tensor = torch.stack(batch_points)  # [N_points, 3]
+                embedded = self.embed_fn(pts_tensor)
+                
+                # 分块查询模型
+                densities = []
+                for i in range(0, embedded.shape[0], self.chunk_size):
+                    chunk = embedded[i:i+self.chunk_size]
+                    raw_output = self.coarse_model(chunk)
+                    density = torch.nn.functional.relu(raw_output[..., 3])  # 密度通道，确保非负
+                    densities.append(density)
+                
+                densities = torch.cat(densities, 0)
+                
+                # 按网格单元分组（每个单元27个点）
+                densities_by_cell = densities.view(-1, 27)  # [N_cells, 27]
+                
+                # 检查每个单元是否有任何密度超过阈值
+                max_densities_per_cell = densities_by_cell.max(dim=1)[0]
+                occupied_mask = max_densities_per_cell > density_threshold
+                
+                # 更新占用网格
+                unique_indices = list(set(batch_indices))
+                for i, (x, y, z) in enumerate(unique_indices):
+                    if i < len(occupied_mask) and occupied_mask[i]:
+                        self.occupancy_grid[x, y, z] = True
+                
+                # 显示进度
+                if batch_start % (batch_size * 10) == 0:
+                    progress = batch_start / (res**3) * 100
+                    print(f"  Progress: {progress:.1f}% ({batch_start}/{res**3} cells)")
+        
+        final_occupancy = self.occupancy_grid.sum().item() / self.occupancy_grid.numel()
+        print(f"KiloNeRF occupancy grid completed. Occupancy rate: {final_occupancy:.4f} ({final_occupancy*100:.2f}%)")
     
     def _update_occupancy_grid(self, pts, densities):
         """根据采样点和密度更新占用网格 - 高效批量版本"""
@@ -849,7 +955,7 @@ class Renderer:
         return is_empty
     
     def _sample_coarse_with_ess(self, rays_o, rays_d):
-        """带ESS的粗糙采样 - 优化版本"""
+        """带ESS的粗糙采样 - 高性能版本"""
         N_rays = rays_o.shape[0]
         
         # 初始采样
@@ -862,50 +968,61 @@ class Renderer:
         z_vals = z_vals.expand([N_rays, self.N_samples])
         
         if self.enable_ess and self.occupancy_grid is not None:
-            # ESS: 跳过空白区域的采样点
-            pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]
+            # ESS: 高效的批量空白区域检测
+            pts = rays_o[..., None, :] + rays_d[..., None, :] * z_vals[..., :, None]  # [N_rays, N_samples, 3]
             pts_flat = pts.reshape(-1, 3)
             
             # 批量检查空白区域
-            is_empty = self._is_empty_space(pts_flat)
-            is_empty = is_empty.reshape(N_rays, self.N_samples)
+            is_empty = self._is_empty_space(pts_flat).reshape(N_rays, self.N_samples)
             
-            # 计算每条光线的空白采样点比例
-            empty_ratio = is_empty.float().mean(dim=1)
+            # 只对真正大量空白的光线进行优化
+            empty_ratios = is_empty.float().mean(dim=1)
+            skip_threshold = getattr(self, 'ess_skip_threshold', 0.5)
+            highly_empty_rays = empty_ratios > skip_threshold
             
-            # 对于空白区域较多的光线，减少采样密度
-            skip_threshold = 0.7  # 如果70%以上的采样点在空白区域，则启用跳过
-            skip_rays = empty_ratio > skip_threshold
-            
-            if skip_rays.any():
-                # 对于需要跳过的光线，减少采样点数
+            # 对于需要优化的光线，智能地重新分布采样点
+            if highly_empty_rays.any():
                 for i in range(N_rays):
-                    if skip_rays[i]:
-                        # 保留非空白区域的采样点
-                        valid_mask = ~is_empty[i]
-                        valid_z_vals = z_vals[i][valid_mask]
+                    if highly_empty_rays[i]:
+                        ray_is_empty = is_empty[i]
+                        ray_z_vals = z_vals[i]
                         
-                        # 如果有效采样点太少，补充一些均匀分布的点
-                        min_samples = max(self.N_samples // 4, 8)  # 至少保留1/4的采样点
-                        if len(valid_z_vals) < min_samples:
-                            extra_samples = min_samples - len(valid_z_vals)
-                            extra_z_vals = torch.linspace(self.near, self.far, extra_samples, device=self.device)
-                            valid_z_vals = torch.cat([valid_z_vals, extra_z_vals])
+                        # 保留非空区域的采样点
+                        occupied_z_vals = ray_z_vals[~ray_is_empty]
                         
-                        # 截断或补齐到固定长度
-                        if len(valid_z_vals) > self.N_samples:
-                            # 随机选择N_samples个点
-                            indices = torch.randperm(len(valid_z_vals))[:self.N_samples]
-                            valid_z_vals = valid_z_vals[indices]
-                        elif len(valid_z_vals) < self.N_samples:
-                            # 补齐到N_samples
-                            padding_size = self.N_samples - len(valid_z_vals)
-                            padding_z_vals = torch.linspace(self.near, self.far, padding_size, device=self.device)
-                            valid_z_vals = torch.cat([valid_z_vals, padding_z_vals])
-                        
-                        # 排序
-                        valid_z_vals, _ = torch.sort(valid_z_vals)
-                        z_vals[i] = valid_z_vals
+                        if len(occupied_z_vals) > 0:
+                            # 在非空区域周围密集采样
+                            min_occupied = occupied_z_vals.min()
+                            max_occupied = occupied_z_vals.max()
+                            
+                            # 保留原有的非空采样点
+                            n_keep = len(occupied_z_vals)
+                            # 在有效区域内补充采样点
+                            n_add = max(0, self.N_samples - n_keep)
+                            
+                            if n_add > 0:
+                                # 在有效区域内均匀采样
+                                additional_z_vals = torch.linspace(
+                                    min_occupied, max_occupied, n_add, device=self.device
+                                )
+                                combined_z_vals = torch.cat([occupied_z_vals, additional_z_vals])
+                            else:
+                                combined_z_vals = occupied_z_vals
+                            
+                            # 确保采样点数量正确
+                            if len(combined_z_vals) > self.N_samples:
+                                # 随机采样到指定数量
+                                indices = torch.randperm(len(combined_z_vals))[:self.N_samples]
+                                combined_z_vals = combined_z_vals[indices]
+                            elif len(combined_z_vals) < self.N_samples:
+                                # 如果还是不够，用原始分布补齐
+                                n_pad = self.N_samples - len(combined_z_vals)
+                                pad_z_vals = ray_z_vals[:n_pad]
+                                combined_z_vals = torch.cat([combined_z_vals, pad_z_vals])
+                            
+                            # 排序并更新
+                            combined_z_vals, _ = torch.sort(combined_z_vals)
+                            z_vals[i] = combined_z_vals
         
         # 添加扰动
         if self.perturb > 0.:
@@ -933,42 +1050,47 @@ class Renderer:
 
         alpha = raw2alpha(raw[..., 3] + noise, dists)
         
-        # ERT: 早期射线终止 - 优化版本
-        weights = None
-        if self.enable_ert:
-            # 逐步计算透射率和权重，遇到早期终止条件时停止
-            N_rays, N_samples = alpha.shape
-            weights = torch.zeros_like(alpha)
-            transmittance = torch.ones(N_rays, device=self.device)
-            
-            for i in range(N_samples):
-                # 计算当前步骤的权重
-                current_alpha = alpha[:, i]
-                current_weight = transmittance * current_alpha
-                weights[:, i] = current_weight
-                
-                # 更新透射率
-                transmittance = transmittance * (1.0 - current_alpha)
-                
-                # 检查是否达到早期终止条件
-                terminate_mask = transmittance < self.ert_threshold
-                
-                # 对于达到终止条件的光线，后续权重设为0
-                if terminate_mask.any() and i < N_samples - 1:
-                    # 将剩余步骤的alpha设为0（这样后续权重自然为0）
-                    alpha[terminate_mask, i+1:] = 0.0
-                    # 也可以直接break来完全跳过后续计算，但这里为了保持张量形状一致
-                    
-        else:
-            # 标准体积渲染
-            weights = alpha * torch.cumprod(torch.cat([torch.ones((alpha.shape[0], 1), device=self.device), 1. - alpha + 1e-10], -1), -1)[:, :-1]
+        # ERT实现：逐步计算透射率，达到阈值时终止
+        N_rays, N_samples = raw.shape[:2]
+        weights = torch.zeros_like(alpha)
+        transmittance = torch.ones(N_rays, device=self.device)
+        terminated_rays = torch.zeros(N_rays, dtype=torch.bool, device=self.device)
         
-        # 计算最终的渲染结果
+        # 按距离从近到远处理（z_vals已经是排序的）
+        for i in range(N_samples):
+            # 只处理未终止的射线
+            active_rays = ~terminated_rays
+            
+            if not active_rays.any():
+                break  # 所有射线都已终止
+            
+            # 计算当前步骤的权重（仅对活跃射线）
+            current_alpha = alpha[active_rays, i]
+            current_transmittance = transmittance[active_rays]
+            current_weight = current_transmittance * current_alpha
+            
+            # 更新权重
+            weights[active_rays, i] = current_weight
+            
+            # 更新透射率
+            transmittance[active_rays] *= (1.0 - current_alpha)
+            
+            # 检查早期终止条件
+            newly_terminated = (transmittance < self.ert_threshold) & active_rays
+            terminated_rays |= newly_terminated
+            
+            # 统计信息（可选）
+            if i % 20 == 0:  # 每20步检查一次
+                active_count = active_rays.sum().item()
+                terminated_count = terminated_rays.sum().item()
+                print(f"  ERT Step {i}: {active_count} active rays, {terminated_count} terminated rays")
+        
+        # 计算最终渲染结果
         rgb_map = torch.sum(weights[..., None] * rgb, -2)
         depth_map = torch.sum(weights * z_vals, -1)
-        disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
         acc_map = torch.sum(weights, -1)
-
+        disp_map = 1. / torch.max(1e-10 * torch.ones_like(depth_map), depth_map / torch.sum(weights, -1))
+        
         # 背景处理
         if self.white_bkgd:
             rgb_map = rgb_map + (1. - acc_map[..., None])
@@ -985,3 +1107,5 @@ class Renderer:
         self.grid_update_counter += 1
 
         return rgb_map, disp_map, acc_map, weights, depth_map
+
+    # ...existing code...
