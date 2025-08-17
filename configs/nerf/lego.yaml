@@ -95,5 +95,5 @@ background_strategy: "none" # "conservative", "smart", or "none"
 # ESS (Empty Space Skipping) and ERT (Early Ray Termination) optimization
 enable_ess: True # enable empty space skipping
 enable_ert: True # enable early ray termination
-ert_threshold: 0.01 # early termination threshold for transmittance
+ert_threshold: 0.001 # early termination threshold for transmittance (更激进的阈值)
 occupancy_grid_resolution: 128 # resolution of occupancy grid for ESS

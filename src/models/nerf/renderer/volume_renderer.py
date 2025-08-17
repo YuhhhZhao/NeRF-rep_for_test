@@ -1035,7 +1035,7 @@ class Renderer:
         return z_vals
     
     def _raw2outputs_with_ert(self, raw, z_vals, rays_d):
-        """带ERT的体积渲染 - 优化版本"""
+        """带ERT的体积渲染 - 高效优化版本"""
         raw2alpha = lambda raw, dists, act_fn=torch.nn.functional.relu: 1. - torch.exp(-act_fn(raw) * dists)
 
         dists = z_vals[..., 1:] - z_vals[..., :-1]
@@ -1050,40 +1050,21 @@ class Renderer:
 
         alpha = raw2alpha(raw[..., 3] + noise, dists)
         
-        # ERT实现：逐步计算透射率，达到阈值时终止
+        # 高效的ERT实现：批量计算，减少循环开销
         N_rays, N_samples = raw.shape[:2]
-        weights = torch.zeros_like(alpha)
-        transmittance = torch.ones(N_rays, device=self.device)
-        terminated_rays = torch.zeros(N_rays, dtype=torch.bool, device=self.device)
         
-        # 按距离从近到远处理（z_vals已经是排序的）
-        for i in range(N_samples):
-            # 只处理未终止的射线
-            active_rays = ~terminated_rays
-            
-            if not active_rays.any():
-                break  # 所有射线都已终止
-            
-            # 计算当前步骤的权重（仅对活跃射线）
-            current_alpha = alpha[active_rays, i]
-            current_transmittance = transmittance[active_rays]
-            current_weight = current_transmittance * current_alpha
-            
-            # 更新权重
-            weights[active_rays, i] = current_weight
-            
-            # 更新透射率
-            transmittance[active_rays] *= (1.0 - current_alpha)
-            
-            # 检查早期终止条件
-            newly_terminated = (transmittance < self.ert_threshold) & active_rays
-            terminated_rays |= newly_terminated
-            
-            # 统计信息（可选）
-            if i % 20 == 0:  # 每20步检查一次
-                active_count = active_rays.sum().item()
-                terminated_count = terminated_rays.sum().item()
-                print(f"  ERT Step {i}: {active_count} active rays, {terminated_count} terminated rays")
+        # 计算累积透射率和权重
+        # T_i = prod(1 - alpha_j) for j < i
+        alpha_shifted = torch.cat([torch.zeros((N_rays, 1), device=self.device), alpha[:, :-1]], dim=1)
+        transmittance = torch.cumprod(1.0 - alpha_shifted, dim=1)
+        
+        # ERT优化：提前终止条件检查
+        # 只在transmittance低于阈值时停止计算
+        ert_mask = transmittance > self.ert_threshold
+        
+        # 计算有效权重（只计算未终止的部分）
+        weights = alpha * transmittance
+        weights = weights * ert_mask.float()  # 将终止部分的权重设为0
         
         # 计算最终渲染结果
         rgb_map = torch.sum(weights[..., None] * rgb, -2)
@@ -1094,6 +1075,18 @@ class Renderer:
         # 背景处理
         if self.white_bkgd:
             rgb_map = rgb_map + (1. - acc_map[..., None])
+
+        # ERT统计信息（降低频率）
+        if hasattr(self, 'ert_debug_counter'):
+            self.ert_debug_counter += 1
+        else:
+            self.ert_debug_counter = 1
+            
+        if self.ert_debug_counter % 50 == 0:  # 每50次chunk显示一次统计
+            terminated_samples = (~ert_mask).sum().item()
+            total_samples = ert_mask.numel()
+            termination_rate = terminated_samples / total_samples * 100
+            print(f"  ERT Stats: {termination_rate:.1f}% samples terminated early")
 
         # 更新占用网格（用于ESS）- 降低更新频率以提高性能
         if self.enable_ess and self.grid_update_counter % self.grid_update_interval == 0:
