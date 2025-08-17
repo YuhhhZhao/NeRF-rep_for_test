@@ -97,3 +97,8 @@ enable_ess: True # enable empty space skipping
 enable_ert: True # enable early ray termination
 ert_threshold: 0.01 # early termination threshold for transmittance (balanced setting)
 occupancy_grid_resolution: 128 # resolution of occupancy grid for ESS
+
+# CUDA Parallel Rendering (GPU核心级并行化)
+use_cuda_kernels: True # enable CUDA parallel rendering kernels
+cuda_blocks: 128 # number of CUDA blocks
+cuda_threads: 256 # number of threads per block

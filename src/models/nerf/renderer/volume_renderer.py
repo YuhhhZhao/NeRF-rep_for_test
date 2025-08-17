@@ -6,6 +6,15 @@ import os
 from tqdm import tqdm
 import cv2
 
+# 尝试导入CUDA扩展
+try:
+    import kilonerf_cuda
+    CUDA_AVAILABLE = True
+    print("CUDA extension loaded successfully!")
+except ImportError as e:
+    print(f"CUDA extension not available: {e}")
+    CUDA_AVAILABLE = False
+
 
 class Renderer:
     def __init__(self, net):
@@ -44,6 +53,11 @@ class Renderer:
         self.ert_threshold = getattr(cfg, 'ert_threshold', 0.05)  # 增大阈值，更激进的早期终止
         self.occupancy_grid_resolution = getattr(cfg, 'occupancy_grid_resolution', 128)  # 占用网格分辨率
         
+        # CUDA并行化参数
+        self.use_cuda_kernels = CUDA_AVAILABLE and getattr(cfg, 'use_cuda_kernels', True)
+        self.cuda_blocks = getattr(cfg, 'cuda_blocks', 128)
+        self.cuda_threads = getattr(cfg, 'cuda_threads', 256)
+        
         # 初始化占用网格（用于ESS）
         self.occupancy_grid = None
         self.grid_update_counter = 0
@@ -51,12 +65,50 @@ class Renderer:
 
         # 初始化占用网格用于ESS
         self._initialize_occupancy_grid()
-
+        
+        # 初始化CUDA kernels
+        if self.use_cuda_kernels:
+            self._init_cuda_kernels()
+            
+    def _init_cuda_kernels(self):
+        """初始化CUDA kernels"""
+        if not CUDA_AVAILABLE:
+            print("Warning: CUDA kernels requested but not available, falling back to PyTorch")
+            self.use_cuda_kernels = False
+            return
+            
+        try:
+            # 初始化stream pool和magma
+            kilonerf_cuda.init_stream_pool()
+            kilonerf_cuda.init_magma()
+            print("CUDA kernels initialized successfully")
+        except Exception as e:
+            print(f"Failed to initialize CUDA kernels: {e}")
+            self.use_cuda_kernels = False
 
     def render(self, batch):
         """
         This function is responsible for rendering the output of the model, which includes the RGB values and the depth values.
         The detailed rendering process is described in the paper.
+        
+        优先使用CUDA并行化渲染，如果失败则回退到PyTorch实现
+        """
+        
+        # 优先尝试CUDA并行化渲染
+        if self.use_cuda_kernels:
+            try:
+                return self.render_cuda_parallel(batch)
+            except Exception as e:
+                print(f"CUDA parallel rendering failed: {e}")
+                print("Falling back to PyTorch implementation...")
+                self.use_cuda_kernels = False  # 禁用后续CUDA尝试
+        
+        # PyTorch实现 (原始方法)
+        return self._render_pytorch(batch)
+    
+    def _render_pytorch(self, batch):
+        """
+        原始的PyTorch渲染实现
         """
         
         # 从batch中获取相机参数
@@ -441,7 +493,7 @@ class Renderer:
                     
                     # 确保在[0,1]范围内
                     rgb_np = np.clip(rgb_np, 0, 1)
-                    disp_np = np.clip(disp_np, 0, np.max(disp_np) if np.max(disp_np) > 0 else 1.0)
+                    disp_np = np.clip(disp_np, 0, np.max(disp_np) if np.max(disp_np) > 0 else 1.0);
                     
                     rgbs.append(rgb_np)
                     disps.append(disp_np)
@@ -1104,4 +1156,266 @@ class Renderer:
 
         return rgb_map, disp_map, acc_map, weights, depth_map
 
-    # ...existing code...
+    def render_cuda_parallel(self, batch):
+        """
+        使用CUDA kernels的并行渲染方法
+        每个GPU核心负责一条光线的渲染计算
+        """
+        if not self.use_cuda_kernels:
+            # 回退到标准实现
+            return self.render(batch)
+            
+        # 从batch中获取相机参数
+        H, W = int(batch['H']), int(batch['W'])
+        pose = batch['pose'].squeeze(0)  # [4, 4]
+        intrinsics = batch['intrinsics'].squeeze(0)  # [3, 3]
+        
+        # 提取相机参数
+        fx, fy = intrinsics[0, 0].item(), intrinsics[1, 1].item()
+        cx, cy = intrinsics[0, 2].item(), intrinsics[1, 2].item()
+        
+        # 相机到世界的变换矩阵 (只取旋转部分)
+        c2w = pose[:3, :3].contiguous()  # [3, 3]
+        origin = pose[:3, 3].contiguous()  # [3]
+        
+        try:
+            # Step 1: 使用CUDA kernel生成光线方向
+            rays_d = kilonerf_cuda.get_rays_d(
+                H, W, cx, cy, fx, fy, c2w, 
+                self.cuda_blocks, self.cuda_threads
+            )  # [H, W, 3]
+            
+            # Step 2: 生成查询索引 (基于深度采样)
+            total_samples = H * W * self.N_samples
+            query_indices = self._generate_query_indices_cuda(H, W, self.N_samples)
+            
+            # Step 3: 使用CUDA kernel计算Fourier特征
+            positions, directions = self._generate_positions_directions_cuda(
+                query_indices, rays_d, origin, H, W
+            )
+            
+            # Step 4: 计算位置和方向的Fourier embedding
+            pos_embeddings = self._compute_fourier_features_cuda(positions, is_position=True)
+            dir_embeddings = self._compute_fourier_features_cuda(directions, is_position=False)
+            
+            # Step 5: 网络评估 (使用CUDA优化的网络前向传播)
+            rgb_sigma = self._network_eval_cuda(pos_embeddings, dir_embeddings, query_indices)
+            
+            # Step 6: 体积积分 (使用CUDA kernel进行并行积分)
+            rgb_map, acc_map = self._integrate_cuda(rgb_sigma, rays_d, H, W)
+            
+            # Step 7: 背景处理
+            if self.white_bkgd:
+                background_color = torch.ones(3, device=self.device)
+                kilonerf_cuda.replace_transparency_by_background_color(
+                    rgb_map.data_ptr(), acc_map, background_color,
+                    self.cuda_blocks, self.cuda_threads
+                )
+            
+            # 重新调整为图像形状
+            rgb_map = rgb_map.view(H, W, 3)
+            acc_map = acc_map.view(H, W)
+            
+            # 计算深度和视差图 (简化版本)
+            depth_map = torch.zeros(H, W, device=self.device)  # TODO: 从积分中计算
+            disp_map = 1. / torch.clamp(depth_map, min=1e-10)
+            
+            return {
+                'rgb_map': rgb_map,
+                'depth_map': depth_map,
+                'disp_map': disp_map,
+                'acc_map': acc_map
+            }
+            
+        except Exception as e:
+            print(f"CUDA rendering failed: {e}, falling back to PyTorch implementation")
+            return self.render(batch)
+    
+    def _generate_query_indices_cuda(self, H, W, N_samples):
+        """生成查询索引用于CUDA kernel"""
+        total_queries = H * W * N_samples
+        
+        # 创建查询索引: (y * W + x) * N_samples + depth_idx
+        query_indices = torch.zeros(total_queries, dtype=torch.int32, device=self.device)
+        
+        idx = 0
+        for y in range(H):
+            for x in range(W):
+                for d in range(N_samples):
+                    query_indices[idx] = (y * W + x) * N_samples + d
+                    idx += 1
+                    
+        return query_indices
+    
+    def _generate_positions_directions_cuda(self, query_indices, rays_d, origin, H, W):
+        """根据查询索引生成3D位置和方向"""
+        N_queries = query_indices.shape[0]
+        
+        # 解码查询索引获取像素坐标和深度索引
+        positions = torch.zeros(N_queries, 3, device=self.device)
+        directions = torch.zeros(N_queries, 3, device=self.device)
+        
+        # 深度采样
+        t_vals = torch.linspace(0., 1., steps=self.N_samples, device=self.device)
+        z_vals = self.near * (1. - t_vals) + self.far * t_vals
+        
+        for i, query_idx in enumerate(query_indices):
+            # 解码查询索引
+            depth_idx = query_idx % self.N_samples
+            pixel_idx = query_idx // self.N_samples
+            y = pixel_idx // W
+            x = pixel_idx % W
+            
+            # 获取光线方向和深度
+            ray_d = rays_d[y, x]  # [3]
+            z_val = z_vals[depth_idx]
+            
+            # 计算3D位置
+            positions[i] = origin + z_val * ray_d
+            directions[i] = ray_d / torch.norm(ray_d)  # 标准化方向
+            
+        return positions, directions
+    
+    def _compute_fourier_features_cuda(self, input_tensor, is_position=True):
+        """使用CUDA kernel计算Fourier特征"""
+        if is_position:
+            # 位置编码: 10个频率
+            num_frequencies = 10
+            frequency_bands = torch.tensor([2.**i for i in range(num_frequencies)], 
+                                         device=self.device, dtype=torch.float32)
+        else:
+            # 方向编码: 4个频率
+            num_frequencies = 4  
+            frequency_bands = torch.tensor([2.**i for i in range(num_frequencies)], 
+                                         device=self.device, dtype=torch.float32)
+        
+        # 为每个输入维度计算Fourier特征
+        input_flat = input_tensor.flatten()  # 展平所有输入
+        
+        try:
+            embeddings = kilonerf_cuda.compute_fourier_features(
+                input_flat, frequency_bands, 
+                self.cuda_blocks, self.cuda_threads, "default"
+            )
+            
+            # 重新调整形状: [N_points, input_dim * (2*num_freq + 1)]
+            input_dim = input_tensor.shape[-1]
+            embed_dim = input_dim * (2 * num_frequencies + 1)
+            embeddings = embeddings.view(-1, embed_dim)
+            
+            return embeddings
+            
+        except Exception as e:
+            print(f"CUDA Fourier features failed: {e}, using PyTorch fallback")
+            # PyTorch fallback
+            return self._compute_fourier_features_pytorch(input_tensor, num_frequencies)
+    
+    def _compute_fourier_features_pytorch(self, input_tensor, num_frequencies):
+        """PyTorch实现的Fourier特征 (fallback)"""
+        frequency_bands = torch.tensor([2.**i for i in range(num_frequencies)], 
+                                     device=self.device, dtype=torch.float32)
+        
+        embeddings = [input_tensor]
+        for freq in frequency_bands:
+            embeddings.append(torch.cos(freq * input_tensor))
+            embeddings.append(torch.sin(freq * input_tensor))
+            
+        return torch.cat(embeddings, dim=-1)
+    
+    def _network_eval_cuda(self, pos_embeddings, dir_embeddings, query_indices):
+        """使用CUDA优化的网络评估"""
+        # TODO: 实现CUDA网络评估
+        # 目前使用PyTorch fallback
+        return self._network_eval_pytorch(pos_embeddings, dir_embeddings)
+    
+    def _network_eval_pytorch(self, pos_embeddings, dir_embeddings):
+        """PyTorch网络评估 (fallback)"""
+        N_points = pos_embeddings.shape[0]
+        
+        # 组合位置和方向embeddings
+        if self.use_viewdirs:
+            full_embeddings = torch.cat([pos_embeddings, dir_embeddings], dim=-1)
+        else:
+            full_embeddings = pos_embeddings
+            
+        # 分块处理避免OOM
+        rgb_sigma_list = []
+        for i in range(0, N_points, self.chunk_size):
+            chunk = full_embeddings[i:i+self.chunk_size]
+            rgb_sigma_chunk = self.coarse_model(chunk)
+            rgb_sigma_list.append(rgb_sigma_chunk)
+            
+        rgb_sigma = torch.cat(rgb_sigma_list, dim=0)
+        return rgb_sigma  # [N_points, 4]
+    
+    def _integrate_cuda(self, rgb_sigma, rays_d, H, W):
+        """使用CUDA kernel进行体积积分"""
+        N_rays = H * W
+        N_samples = self.N_samples
+        
+        # 准备数据
+        rgb_sigma_tensor = rgb_sigma.view(N_rays, N_samples, 4)  # [N_rays, N_samples, 4]
+        rgb_sigma_flat = rgb_sigma_tensor.contiguous()
+        
+        # 计算光线间距
+        t_vals = torch.linspace(0., 1., steps=N_samples, device=self.device)
+        z_vals = self.near * (1. - t_vals) + self.far * t_vals
+        dists = z_vals[1:] - z_vals[:-1]
+        dists = torch.cat([dists, torch.tensor([1e10], device=self.device)])
+        dists = dists.expand(N_rays, -1).contiguous()
+        
+        # 输出缓冲区
+        rgb_map = torch.zeros(N_rays, 3, device=self.device)
+        acc_map = torch.zeros(N_rays, device=self.device)
+        transmittance = torch.ones(N_rays, device=self.device)
+        active_ray_mask = torch.ones(N_rays, dtype=torch.bool, device=self.device)
+        
+        try:
+            # 调用CUDA积分kernel
+            kilonerf_cuda.integrate(
+                rgb_sigma_flat, dists, rgb_map.data_ptr(),
+                acc_map, transmittance, active_ray_mask,
+                N_rays, N_samples, self.ert_threshold, True,
+                self.cuda_blocks, self.cuda_threads, 0  # version 0
+            )
+            
+            return rgb_map, acc_map
+            
+        except Exception as e:
+            print(f"CUDA integration failed: {e}, using PyTorch fallback")
+            return self._integrate_pytorch(rgb_sigma_tensor, z_vals)
+    
+    def _integrate_pytorch(self, rgb_sigma, z_vals):
+        """PyTorch体积积分实现 (fallback)"""
+        N_rays, N_samples = rgb_sigma.shape[:2]
+        
+        # 计算距离
+        dists = z_vals[1:] - z_vals[:-1]
+        dists = torch.cat([dists, torch.tensor([1e10], device=self.device)])
+        dists = dists.expand(N_rays, -1)
+        
+        # 提取RGB和density
+        rgb = torch.sigmoid(rgb_sigma[..., :3])
+        sigma = torch.nn.functional.relu(rgb_sigma[..., 3])
+        
+        # 计算alpha
+        alpha = 1.0 - torch.exp(-sigma * dists)
+        
+        # 计算权重
+        alpha_shifted = torch.cat([torch.zeros((N_rays, 1), device=self.device), alpha[:, :-1]], dim=1)
+        transmittance = torch.cumprod(1.0 - alpha_shifted, dim=1)
+        weights = alpha * transmittance
+        
+        # 体积渲染
+        rgb_map = torch.sum(weights[..., None] * rgb, dim=1)  # [N_rays, 3]
+        acc_map = torch.sum(weights, dim=1)  # [N_rays]
+        
+        return rgb_map, acc_map
+
+    def __del__(self):
+        """清理CUDA资源"""
+        if self.use_cuda_kernels and CUDA_AVAILABLE:
+            try:
+                kilonerf_cuda.destroy_stream_pool()
+            except:
+                pass  # 忽略清理错误
