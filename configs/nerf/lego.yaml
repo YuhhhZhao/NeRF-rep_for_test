@@ -2,8 +2,11 @@ task: "nerf_replication"
 gpus: [0] # set gpu device number
 exp_name: "nerf"
 scene: "lego"
-
-train_dataset_module: src.datasets.nerf.blender
+# ESS (Empty Space Skipping) and ERT (Early Ray Termination) optimization
+enable_ess: True # enable empty space skipping
+enable_ert: True # enable early ray termination
+ert_threshold: 0.05 # early termination threshold for transmittance (increased for more aggressive termination)
+occupancy_grid_resolution: 128 # resolution of occupancy grid for ESSin_dataset_module: src.datasets.nerf.blender
 test_dataset_module: src.datasets.nerf.blender
 network_module: src.models.nerf.network
 renderer_module: src.models.nerf.renderer.volume_renderer
